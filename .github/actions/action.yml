@@ -1098,17 +1098,14 @@ runs:
         CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
 
-
-        - name: Build Kernel
-        shell: bash
-        env:
-          PYTHONWARNINGS: "ignore:invalid escape sequence"
-        run: |
-          set -euo pipefail
-          echo "::group::Build kernel with ccache optimization"
-          
-          RANDOM_SUFFIX=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)
-    
+    - name: Build Kernel
+      shell: bash
+      env:
+        PYTHONWARNINGS: "ignore:invalid escape sequence"
+      run: |
+        set -euo pipefail
+        echo "::group::Build kernel with ccache optimization"
+        
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         cd "$COMMON"
@@ -1206,18 +1203,12 @@ runs:
         
         make O="$OUT" gki_defconfig
         
-        LOCAL_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
-    
-        echo "✅ 使用自定义内核后缀: $LOCAL_LOCALVERSION"
-
-
+        LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--OP-WILD}"
         if [ -n "${LOCAL_LOCALVERSION:-}" ]; then
           scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${LOCAL_LOCALVERSION}"
           scripts/config --file "$OUT/.config" -d LOCALVERSION_AUTO || true
           sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
         fi
-
-    
         
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
