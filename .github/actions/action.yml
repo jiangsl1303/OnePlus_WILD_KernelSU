@@ -1,3 +1,4 @@
+
 name: 'Build OnePlus Kernel with KernelSU Next'
 
 inputs:
@@ -1094,16 +1095,8 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         cd "$KERNEL_PATH/common"
         mkdir -p out
-    
-        # 使用openssl生成8位随机数字和字母组合（更稳定）
-        RANDOM_SUFFIX=$(openssl rand -base64 6 | tr -dc 'a-zA-Z0-9' | head -c8)
-        CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
-    
+        CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
-    
-    echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
-
 
     - name: Build Kernel
       shell: bash
