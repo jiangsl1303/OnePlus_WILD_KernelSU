@@ -1,3 +1,4 @@
+
 name: 'Build OnePlus Kernel with KernelSU Next'
 
 inputs:
@@ -584,9 +585,9 @@ runs:
             SUSFS_BRANCH="${DEFAULT_SUSFS[$KERNEL_KEY]:-gki-android15-6.6}"
             echo "ℹ️  Using default SUSFS branch for $KERNEL_KEY: $SUSFS_BRANCH"
           else
-            # User provided  branch/commit
+            # User provided custom branch/commit
             SUSFS_BRANCH="$SUSFS_INPUT"
-            echo "🔧 Using  SUSFS ref: $SUSFS_BRANCH"
+            echo "🔧 Using custom SUSFS ref: $SUSFS_BRANCH"
           fi
         fi
         
@@ -1086,56 +1087,28 @@ runs:
           echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
         fi
 
-
-- name: Save Build Metadata
-  id: save_metadata
-  shell: bash
-  run: |
-    set -euo pipefail
-    echo "Save Build Metadata"
-    CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-    ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
-    cd "$ARTIFACTS_DIR"
-    echo "kernel_version=${{ env.KERNel_FULL_VER }}" >> "$GITHUB_OUTPUT"
-    echo "ksu_version=${KSUVER:-unknown}" >> "$GITHUB_OUTPUT"
-    echo "ksu_type=${{ inputs.ksu_type }}" >> "$GITHUB_OUTPUT"
-    if [ "${{ env.OP_SUSFS }}" = true ]; then
-      echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
-    fi
-
-
-
-- name: Customize Kernel Branding
-  shell: bash
-  run: |
-    set -euo pipefail
-    echo "Customize Kernel Branding"
-    KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-    cd "$KERNEL_PATH/common"
-    mkdir -p out
-
-    # 使用更稳定的方法生成随机字符串
-    RANDOM_SUFFIX=$(date +%s | sha256sum | base64 | head -c8)
-    CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
-    
-    echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-    echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
-    
-    echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
-
-
-
-
-
-
-    - name: Build Kernel
+    - name: Customize Kernel Branding
       shell: bash
-      env:
-        PYTHONWARNINGS: "ignore:invalid escape sequence"
       run: |
         set -euo pipefail
-        echo "::group::Build kernel with ccache optimization"
-        
+        echo "Customize Kernel Branding"
+        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        cd "$KERNEL_PATH/common"
+        mkdir -p out
+        CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
+        echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
+
+
+        - name: Build Kernel
+        shell: bash
+        env:
+          PYTHONWARNINGS: "ignore:invalid escape sequence"
+        run: |
+          set -euo pipefail
+          echo "::group::Build kernel with ccache optimization"
+          
+          RANDOM_SUFFIX=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)
+    
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         cd "$COMMON"
@@ -1232,15 +1205,20 @@ runs:
         echo "============================================"
         
         make O="$OUT" gki_defconfig
-        LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--ysyz-${RANDOM_SUFFIX}}"
+        
+        LOCAL_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
+    
+        echo "✅ 使用自定义内核后缀: $LOCAL_LOCALVERSION"
+
+
         if [ -n "${LOCAL_LOCALVERSION:-}" ]; then
           scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${LOCAL_LOCALVERSION}"
           scripts/config --file "$OUT/.config" -d LOCALVERSION_AUTO || true
           sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
         fi
 
-      
     
+        
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
           scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
@@ -1486,18 +1464,12 @@ runs:
         
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
-
-
-                
-        if [ "${{ env.OP_SUSFS }}" = true ]; then
-          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_SuSFS_${SUSVER:-unknown}_ysyz-${RANDOM_SUFFIX}.zip"
-        else
-          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_ysyz-${RANDOM_SUFFIX}.zip"
-        fi
-
-    
-
         
+        if [ "${{ env.OP_SUSFS }}" = true ]; then
+          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_SuSFS_${SUSVER:-unknown}.zip"
+        else
+          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}.zip"
+        fi
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
