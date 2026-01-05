@@ -584,9 +584,9 @@ runs:
             SUSFS_BRANCH="${DEFAULT_SUSFS[$KERNEL_KEY]:-gki-android15-6.6}"
             echo "ℹ️  Using default SUSFS branch for $KERNEL_KEY: $SUSFS_BRANCH"
           else
-            # User provided custom branch/commit
+            # User provided  branch/commit
             SUSFS_BRANCH="$SUSFS_INPUT"
-            echo "🔧 Using custom SUSFS ref: $SUSFS_BRANCH"
+            echo "🔧 Using  SUSFS ref: $SUSFS_BRANCH"
           fi
         fi
         
@@ -1087,23 +1087,42 @@ runs:
         fi
 
 
-        - name: Customize Kernel Branding
-          shell: bash
-          run: |
-            set -euo pipefail
-            echo "Customize Kernel Branding"
-            KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-            cd "$KERNEL_PATH/common"
-            mkdir -p out
+- name: Save Build Metadata
+  id: save_metadata
+  shell: bash
+  run: |
+    set -euo pipefail
+    echo "Save Build Metadata"
+    CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+    ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+    cd "$ARTIFACTS_DIR"
+    echo "kernel_version=${{ env.KERNel_FULL_VER }}" >> "$GITHUB_OUTPUT"
+    echo "ksu_version=${KSUVER:-unknown}" >> "$GITHUB_OUTPUT"
+    echo "ksu_type=${{ inputs.ksu_type }}" >> "$GITHUB_OUTPUT"
+    if [ "${{ env.OP_SUSFS }}" = true ]; then
+      echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
+    fi
+
+
+
+- name: Customize Kernel Branding
+  shell: bash
+  run: |
+    set -euo pipefail
+    echo "Customize Kernel Branding"
+    KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+    cd "$KERNEL_PATH/common"
+    mkdir -p out
+
+    # 使用更稳定的方法生成随机字符串
+    RANDOM_SUFFIX=$(date +%s | sha256sum | base64 | head -c8)
+    CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
     
-            # 使用$RANDOM环境变量组合
-            RANDOM_SUFFIX=$(echo "${RANDOM}${RANDOM}${RANDOM}${RANDOM}" | md5sum | head -c8)
-            CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
-            
-            echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-            echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
+    echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
+    echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
     
-            echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
+    echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
+
 
 
 
