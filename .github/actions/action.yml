@@ -1087,25 +1087,25 @@ runs:
         fi
 
 
-
-
-    - name: Customize Kernel Branding
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Customize Kernel Branding"
-        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        cd "$KERNEL_PATH/common"
-        mkdir -p out
+        - name: Customize Kernel Branding
+          shell: bash
+          run: |
+            set -euo pipefail
+            echo "Customize Kernel Branding"
+            KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+            cd "$KERNEL_PATH/common"
+            mkdir -p out
     
-        # 生成8位随机数字和字母组合
-        RANDOM_SUFFIX=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c8)
-        CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
-        
-        echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
-        
-        echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
+            # 使用$RANDOM环境变量组合
+            RANDOM_SUFFIX=$(echo "${RANDOM}${RANDOM}${RANDOM}${RANDOM}" | md5sum | head -c8)
+            CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
+            
+            echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
+            echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
+    
+            echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
+
+
 
 
 
