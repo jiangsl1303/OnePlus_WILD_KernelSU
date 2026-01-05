@@ -1086,6 +1086,9 @@ runs:
           echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
         fi
 
+
+
+
     - name: Customize Kernel Branding
       shell: bash
       run: |
@@ -1094,8 +1097,17 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         cd "$KERNEL_PATH/common"
         mkdir -p out
-        CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
+    
+        # 生成8位随机数字和字母组合
+        RANDOM_SUFFIX=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c8)
+        CUSTOM_LOCALVERSION="-${ANDROID_VER}-ysyz-${RANDOM_SUFFIX}"
+        
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
+        echo "RANDOM_SUFFIX=$RANDOM_SUFFIX" >> "$GITHUB_ENV"
+        
+        echo "✅ 自定义内核版本后缀: $CUSTOM_LOCALVERSION"
+
+
 
     - name: Build Kernel
       shell: bash
@@ -1201,14 +1213,15 @@ runs:
         echo "============================================"
         
         make O="$OUT" gki_defconfig
-        
-        LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--OP-WILD}"
+        LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--ysyz-${RANDOM_SUFFIX}}"
         if [ -n "${LOCAL_LOCALVERSION:-}" ]; then
           scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${LOCAL_LOCALVERSION}"
           scripts/config --file "$OUT/.config" -d LOCALVERSION_AUTO || true
           sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
         fi
-        
+
+      
+    
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
           scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
@@ -1454,12 +1467,18 @@ runs:
         
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
-        
+
+
+                
         if [ "${{ env.OP_SUSFS }}" = true ]; then
-          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_SuSFS_${SUSVER:-unknown}.zip"
+          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_SuSFS_${SUSVER:-unknown}_ysyz-${RANDOM_SUFFIX}.zip"
         else
-          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}.zip"
+          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_ysyz-${RANDOM_SUFFIX}.zip"
         fi
+
+    
+
+        
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
