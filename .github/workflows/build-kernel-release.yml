@@ -577,9 +577,12 @@ jobs:
             if [ -f "$file" ]; then
               full_model=$(basename "$file" .txt)
               model=$(echo "$full_model" | sed -E 's/_[^_]*$//')
-              os_version=$(sed -n '2p' "$file")
               kernel_version=$(sed -n '1p' "$file")
-              device_info["$full_model"]="$model|$os_version|$kernel_version"
+              os_version=$(sed -n '2p' "$file")
+              ksu_type=$(sed -n '3p' "$file")
+              ksu_ver=$(sed -n '4p' "$file")
+              susfs_ver=$(sed -n '5p' "$file")
+              device_info["$full_model"]="$model|$os_version|$kernel_version|$ksu_type|$ksu_ver|$susfs_ver"
             fi
           done
           
@@ -625,9 +628,13 @@ jobs:
           EOF
           
           for full_key in $(printf '%s\n' "${!device_info[@]}" | sort); do
-            IFS='|' read -r model os_ver kernel_ver <<< "${device_info[$full_key]}"
+            IFS='|' read -r model os_ver kernel_ver ksu_type ksu_ver susfs_ver <<< "${device_info[$full_key]}"
             
-            model_link="[${model}](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS/releases/download/${NEW_TAG}/AK3_${model}_${os_ver}_${kernel_ver}_KSUN_${{ needs.build.outputs.ksu_ver }}_SuSFS_${SUSFS_BASE_VERSION}.zip)"
+            if [ -n "$susfs_ver" ]; then
+              model_link="[${model}](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS/releases/download/${NEW_TAG}/AK3_${model}_${os_ver}_${kernel_ver}_${ksu_type}_${ksu_ver}_SuSFS_${susfs_ver}.zip)"
+            else
+              model_link="[${model}](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS/releases/download/${NEW_TAG}/AK3_${model}_${os_ver}_${kernel_ver}_${ksu_type}_${ksu_ver}.zip)"
+            fi
             
             # Use jq to extract feature flags for this model from the JSON matrix
             feature_flags=$(jq -r --arg MODEL "$model" '
@@ -656,6 +663,14 @@ jobs:
               "$model_link" "$os_ver" "$kernel_ver" "$features" >> release_notes.md
           done
           
+          if [ ${#device_info[@]} -gt 0 ]; then
+            first_entry=$(printf '%s\n' "${!device_info[@]}" | sort | head -n1)
+            IFS='|' read -r _ _ _ _ ksu_ver_global _ <<< "${device_info[$first_entry]}"
+          else
+            echo "::error::No device info found!" >&2
+            exit 1
+          fi
+          
           cat << EOF >> release_notes.md
           
           ---
@@ -668,12 +683,12 @@ jobs:
           if [ -n "$KSUN_BRANCH" ]; then
             cat << EOF >> release_notes.md
           | **KernelSU Next Branch** | \`$KSUN_BRANCH\` |
-          | **KernelSU Next Version** | \`${{ needs.build.outputs.ksu_ver }}\` |
+          | **KernelSU Next Version** | \`$ksu_ver_global\` |
           EOF
           elif [ -n "$KSU_BRANCH" ]; then
             cat << EOF >> release_notes.md
           | **KernelSU Branch** | \`$KSU_BRANCH\` |
-          | **KernelSU Version** | \`${{ needs.build.outputs.ksu_ver }}\` |
+          | **KernelSU Version** | \`$ksu_ver_global\` |
           EOF
           else
             cat << EOF >> release_notes.md
