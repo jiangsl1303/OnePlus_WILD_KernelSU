@@ -849,7 +849,7 @@ jobs:
             --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
             --title "${{ env.RELEASE_NAME }}" \
             --notes-file release_notes.md \
-            --prerelease
+            --draft
 
       - name: 📤 Upload Release Assets Dynamically
         run: |
