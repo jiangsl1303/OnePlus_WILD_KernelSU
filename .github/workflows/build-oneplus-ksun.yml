@@ -43,10 +43,13 @@ on:
         default: 'auto'
 
       ksu_ref:
-        description: 'KernelSU-Next 分支或 commit（默认 dev 分支，即最新）'
+        description: >-
+          KernelSU-Next 分支或 commit。默认钉到 234f6e04（= KSUN 33239），
+          因为上游 kernel_patches 的 SUSFS v2.2.0 修复补丁只适配到该版本；
+          填 dev 会取到过新的 KernelSU-Next，导致 SUSFS 修复补丁打不上而失败。
         required: true
         type: string
-        default: 'dev'
+        default: '234f6e040fcbca18b16d2398e1aa225712ec99ad'
 
       susfs_ref:
         description: >-
@@ -254,6 +257,20 @@ jobs:
             ksu_resolved="$KSU_REF"
           fi
           echo "KernelSU-Next → $ksu_resolved"
+
+          # 4.1) 提示：KernelSU-Next 版本必须与 SUSFS 修复补丁集匹配
+          #      上游 kernel_patches 的 v2.2.0 修复补丁是按 KSUN 33239 生成的
+          #      （见其提交信息 “Update KSUN 33239 SusFS 2.2.0 + KSU_Toolkit”）。
+          #      KernelSU-Next 更新后，10_enable_susfs_for_ksu.patch 会产生新的 .rej 文件，
+          #      而对应 fix_*.patch 不存在，导致构建报
+          #      “fix_xxx.patch: No such file or directory” 而失败。
+          case "$KSU_REF" in
+            dev|latest|main|next|HEAD|master)
+              if [ "${SUSFS_REF:-auto}" != "latest" ]; then
+                echo "::warning::ksu_ref=$KSU_REF 是滚动分支，版本可能已超过 KSUN 33239；SUSFS v2.2.0 修复补丁只适配到 33239。若构建失败，请改用默认值 234f6e040fcbca18b16d2398e1aa225712ec99ad。"
+              fi
+              ;;
+          esac
 
           # 5) 解析每个内核版本对应的 SUSFS 引用
           #
