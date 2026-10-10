@@ -48,6 +48,16 @@ on:
         type: string
         default: 'dev'
 
+      susfs_ref:
+        description: >-
+          SUSFS 源码引用。auto(默认) = 钉到各内核分支最后一个 v2.2.0 提交
+          （上游 kernel_patches 目前只提供到 v2.2.0 的修复补丁，取分支头会因
+          v2.3.0 报 Unsupported SUSFS version）；latest = 跟随分支头；
+          也可直接填 40 位 commit 或分支名。
+        required: true
+        type: string
+        default: 'auto'
+
       optimize_level:
         description: '编译优化等级'
         required: true
@@ -123,6 +133,7 @@ jobs:
           DEVICE_INPUT: ${{ inputs.device }}
           AV_INPUT: ${{ inputs.android_version }}
           KSU_REF: ${{ inputs.ksu_ref }}
+          SUSFS_REF: ${{ inputs.susfs_ref }}
         run: |
           set -euo pipefail
           echo "::group::Generate matrix"
@@ -244,29 +255,81 @@ jobs:
           fi
           echo "KernelSU-Next → $ksu_resolved"
 
-          # 5) 解析每个内核版本对应的 SUSFS commit
+          # 5) 解析每个内核版本对应的 SUSFS 引用
+          #
+          #    背景：上游 WildKernels/kernel_patches 的 next/susfs_fix_patches 只提供到
+          #    v2.2.0；而 susfs4ksu 的各 gki-* 分支已于 2026-08-30 升到 v2.3.0。
+          #    若直接取分支头，action 会在 “Apply SUSFS Patches” 阶段硬失败：
+          #        ##[error]Unsupported SUSFS version: v2.3.0
+          #    因此默认钉到各分支“最后一个 v2.2.0 提交”（即 v2.3.0 bump 的父提交）。
+          #    上游补齐 v2.3.0 修复补丁后，把 susfs_ref 设为 latest 即可跟随分支头。
+          #
+          #    注意：这里刻意用 12 位短 SHA。gitlab.com 的 WAF 会对 URL 路径里
+          #    完整的 40 位十六进制串直接返回 403（Cloudflare 挑战页），短 SHA 不受影响，
+          #    而 GitLab 的 /-/archive/<ref>/ 与 /-/raw/<ref>/ 都能正常解析短 SHA。
+          declare -A SUSFS_V220=(
+            ["android12-5.10"]="46e4c5a1a28a"
+            ["android13-5.10"]="8d3e36cfdec5"
+            ["android13-5.15"]="ada03b388c97"
+            ["android14-5.15"]="98de2fb330d5"
+            ["android14-6.1"]="077730110ca6"
+            ["android15-6.6"]="da55e071ad01"
+            ["android16-6.12"]="5021c4fa1c71"
+          )
+
+          # action.yml 的 case 分支能识别的版本集合
+          susfs_supported() {
+            case "$1" in
+              v1.5.8|v1.5.9|v1.5.10|v1.5.11|v1.5.12|v2.0.0|v2.1.0|v2.2.0) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # 读取某个 ref 的 susfs.h 中声明的版本号
+          susfs_version_of() {
+            curl -fsSL --retry 2 --retry-delay 3 --max-time 40 \
+              "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$1/kernel_patches/include/linux/susfs.h" \
+              2>/dev/null \
+              | tr -d '\r' | grep -m1 '#define SUSFS_VERSION' | awk -F'"' '{print $2}' || true
+          }
+
           declare -A susfs_map
           mapfile -t active_keys < <(
             jq -r '[.[] | select(.susfs == true) | "\(.android_version)-\(.kernel_version)"] | unique | .[]' \
-              /tmp/stage2.json
+              /tmp/stage2.json | tr -d '\r'
           )
           for key in "${active_keys[@]}"; do
             branch="gki-${key}"
             sha=""
-            for i in 1 2 3; do
-              sha=$(curl -fsSL --retry 2 \
-                "https://gitlab.com/api/v4/projects/simonpunk%2Fsusfs4ksu/repository/commits?ref_name=${branch}&per_page=1" \
-                2>/dev/null | jq -r '.[0].id // empty' || true)
-              [ -n "$sha" ] && break
-              sleep 5
-            done
-            if [ -n "$sha" ]; then
-              susfs_map["$key"]="$sha"
-              echo "SUSFS [$key] → $sha"
-            else
-              echo "::warning::SUSFS [$key] 解析失败，将留空由构建器自动选择。"
-              susfs_map["$key"]=""
-            fi
+            case "${SUSFS_REF:-auto}" in
+              ''|auto|pinned)
+                sha="${SUSFS_V220[$key]:-}"
+                if [ -n "$sha" ]; then
+                  ver=$(susfs_version_of "$sha")
+                  if [ -n "$ver" ] && ! susfs_supported "$ver"; then
+                    echo "::warning::SUSFS [$key] 钉定提交 $sha 报告 $ver，不在 action 支持列表内。"
+                  fi
+                  echo "SUSFS [$key] → 钉定 ${sha:0:12} (v2.2.0 末次提交${ver:+, 实测 $ver})"
+                else
+                  echo "::warning::SUSFS [$key] 无内置钉定值，回退分支头 $branch。"
+                  sha="$branch"
+                fi
+                ;;
+              latest|branch|head)
+                sha="$branch"
+                ver=$(susfs_version_of "$sha")
+                if [ -n "$ver" ] && ! susfs_supported "$ver"; then
+                  sha="${SUSFS_V220[$key]:-$branch}"
+                  echo "::warning::SUSFS [$key] 分支头 $branch 报告 $ver，上游 action 尚不支持；已回退钉定值 ${sha}。"
+                fi
+                echo "SUSFS [$key] → $sha${ver:+, 分支头版本 $ver}"
+                ;;
+              *)
+                sha="$SUSFS_REF"
+                echo "SUSFS [$key] → 用户指定 $sha"
+                ;;
+            esac
+            susfs_map["$key"]="$sha"
           done
 
           # 6) 注入 ksu / susfs 字段，生成最终 matrix
@@ -296,9 +359,12 @@ jobs:
           {
             echo "## 将要构建的设备（$count 个）"
             echo ""
-            echo "| 型号 | OS | 内核 | SoC | 分支 | KSU |"
-            echo "|------|----|------|-----|------|-----|"
-            jq -r '.[] | "| \(.model) | \(.os_version) | \(.android_version)-\(.kernel_version) | \(.soc) | \(.branch) | KSUN |"' /tmp/final.json
+            echo "| 型号 | OS | 内核 | SoC | 分支 | KSU | SUSFS |"
+            echo "|------|----|------|-----|------|-----|-------|"
+            jq -r '.[] | "| \(.model) | \(.os_version) | \(.android_version)-\(.kernel_version) | \(.soc) | \(.branch) | KSUN | `\(.susfs_resolved_hash)` |"' /tmp/final.json
+            echo ""
+            echo "> SUSFS 默认钉定到各内核分支最后一个 **v2.2.0** 提交（上游 \`kernel_patches\` 的修复补丁目前只到 v2.2.0）。"
+            echo "> 如需跟随分支头（上游补齐 v2.3.0 支持后），把 \`susfs_ref\` 设为 \`latest\`。"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "::endgroup::"
