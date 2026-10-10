@@ -801,9 +801,25 @@ runs:
           fi
           
           while [ $attempt -le $max_attempts ]; do
-              echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
+              echo " Attempt $attempt/$max_attempts: Fetch for $repo_name ($branch)"
               
-              if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
+              # 优先 curl，其次 aria2c。
+              # 原因：gitlab.com 的 WAF 会把 aria2c（多连接 + Range 请求指纹）判为机器人，
+              # 对同一 URL 直接返回 403（HttpSkipResponseCommand.cc:239 errorCode=22 status=403），
+              # 而 curl 请求同一 URL 正常 200。故先 curl，失败再退回 aria2c 兜底。
+              local fetched=0
+              if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 \
+                    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+                    -H "Accept: */*" \
+                    -o "$shm_path" "$download_url"; then
+                  fetched=1
+                  echo "   ↳ curl ok ($(stat -c%s "$shm_path" 2>/dev/null || echo '?') bytes)"
+              elif aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
+                  fetched=1
+                  echo "   ↳ aria2c ok"
+              fi
+              
+              if [ "$fetched" = "1" ]; then
                   mkdir -p "$repo_name"
                   if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
                       echo "✅ Success: $repo_name synced"
