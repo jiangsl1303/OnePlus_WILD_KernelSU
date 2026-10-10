@@ -453,6 +453,7 @@ jobs:
             exit 0
           fi
           CACHE_DIR="${GITHUB_WORKSPACE}/.ccache"
+          CCACHE_LOG="${GITHUB_WORKSPACE}/ccache.log"
           mkdir -p "$CACHE_DIR"
           cat >> "$GITHUB_ENV" <<EOF
           CCACHE_DIR=${CACHE_DIR}
@@ -468,6 +469,7 @@ jobs:
           CCACHE_INODE_CACHE=true
           CCACHE_IS_KERNEL_COMPILING=true
           CCACHE_UMASK=002
+          CCACHE_LOGFILE=${CCACHE_LOG}
           CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
           EOF
           ccache --version | head -1
