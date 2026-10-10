@@ -53,9 +53,10 @@ on:
 
       susfs_ref:
         description: >-
-          SUSFS 源码引用。auto(默认) = 钉到各内核分支最后一个 v2.2.0 提交
-          （上游 kernel_patches 目前只提供到 v2.2.0 的修复补丁，取分支头会因
-          v2.3.0 报 Unsupported SUSFS version）；latest = 跟随分支头；
+          SUSFS 源码引用。auto(默认) = 钉到各内核分支 2026-08-11 的提交
+          （与 kernel_patches 的 v2.2.0 修复补丁、KSUN 33239 严格配对；取分支头
+          会因 v2.3.0 报 Unsupported SUSFS version，取更晚的 v2.2.0 提交会因
+          .rej 文件没有对应 fix_*.patch 而失败）；latest = 跟随分支头；
           也可直接填 40 位 commit 或分支名。
         required: true
         type: string
@@ -274,24 +275,36 @@ jobs:
 
           # 5) 解析每个内核版本对应的 SUSFS 引用
           #
-          #    背景：上游 WildKernels/kernel_patches 的 next/susfs_fix_patches 只提供到
-          #    v2.2.0；而 susfs4ksu 的各 gki-* 分支已于 2026-08-30 升到 v2.3.0。
-          #    若直接取分支头，action 会在 “Apply SUSFS Patches” 阶段硬失败：
-          #        ##[error]Unsupported SUSFS version: v2.3.0
-          #    因此默认钉到各分支“最后一个 v2.2.0 提交”（即 v2.3.0 bump 的父提交）。
-          #    上游补齐 v2.3.0 修复补丁后，把 susfs_ref 设为 latest 即可跟随分支头。
+          #    背景：这是一组「必须成对」的版本。
+          #    · 上游 WildKernels/kernel_patches 的 next/susfs_fix_patches 只提供到 v2.2.0，
+          #      且其 v2.2.0 目录是按 KSUN 33239 生成的
+          #      （提交信息：“Update KSUN 33239 SusFS 2.2.0 + KSU_Toolkit”，2026-08-11）。
+          #    · susfs4ksu 各 gki-* 分支已于 2026-08-30 升到 v2.3.0，取分支头会直接报
+          #      “Unsupported SUSFS version: v2.3.0”。
+          #    · SUSFS 太新或 KSU 太新，10_enable_susfs_for_ksu.patch 都会在更多文件上产生
+          #      .rej，而对应 fix_*.patch 不存在 → 构建报
+          #      “fix_xxx.patch: No such file or directory” 而失败。
+          #
+          #    所以两边一起钉：
+          #      SUSFS = 各分支在 2026-08-11（kernel_patches v2.2.0 最后一次更新）时的提交
+          #      KSU   = 234f6e04（该日期的 dev HEAD，版本号 33239）
+          #    已用 `patch -p1 --forward` 实测：7 个分支产生的 .rej 恰好等于
+          #    {Kbuild, init.c, kernel_umount.c, setuid_hook.c, sucompat.c, supercall.c}，
+          #    与 v2.2.0 目录下的 6 个 fix_*.patch 一一对应。
+          #
+          #    上游补齐 v2.3.0 修复补丁后，把 susfs_ref 设为 latest 并把 ksu_ref 改回 dev。
           #
           #    注意：这里刻意用 12 位短 SHA。gitlab.com 的 WAF 会对 URL 路径里
           #    完整的 40 位十六进制串直接返回 403（Cloudflare 挑战页），短 SHA 不受影响，
           #    而 GitLab 的 /-/archive/<ref>/ 与 /-/raw/<ref>/ 都能正常解析短 SHA。
           declare -A SUSFS_V220=(
-            ["android12-5.10"]="46e4c5a1a28a"
-            ["android13-5.10"]="8d3e36cfdec5"
-            ["android13-5.15"]="ada03b388c97"
-            ["android14-5.15"]="98de2fb330d5"
-            ["android14-6.1"]="077730110ca6"
-            ["android15-6.6"]="da55e071ad01"
-            ["android16-6.12"]="5021c4fa1c71"
+            ["android12-5.10"]="3c14ad549f82"
+            ["android13-5.10"]="f81aaf10e956"
+            ["android13-5.15"]="ccb1918684b2"
+            ["android14-5.15"]="0463ac089308"
+            ["android14-6.1"]="e287d5906638"
+            ["android15-6.6"]="be7b7ef49a1e"
+            ["android16-6.12"]="f37930f374ef"
           )
 
           # action.yml 的 case 分支能识别的版本集合
@@ -330,7 +343,7 @@ jobs:
                   if [ -n "$ver" ] && ! susfs_supported "$ver"; then
                     echo "::warning::SUSFS [$key] 钉定提交 $sha 报告 $ver，不在 action 支持列表内。"
                   fi
-                  echo "SUSFS [$key] → 钉定 ${sha:0:12} (v2.2.0 末次提交${ver:+, 实测 $ver})"
+                  echo "SUSFS [$key] → 钉定 ${sha:0:12} (配对提交${ver:+, 实测 $ver})"
                 else
                   echo "::warning::SUSFS [$key] 无内置钉定值，回退分支头 $branch。"
                   sha="$branch"
@@ -384,8 +397,8 @@ jobs:
             echo "|------|----|------|-----|------|-----|-------|"
             jq -r '.[] | "| \(.model) | \(.os_version) | \(.android_version)-\(.kernel_version) | \(.soc) | \(.branch) | KSUN | `\(.susfs_resolved_hash)` |"' /tmp/final.json
             echo ""
-            echo "> SUSFS 默认钉定到各内核分支最后一个 **v2.2.0** 提交（上游 \`kernel_patches\` 的修复补丁目前只到 v2.2.0）。"
-            echo "> 如需跟随分支头（上游补齐 v2.3.0 支持后），把 \`susfs_ref\` 设为 \`latest\`。"
+            echo "> SUSFS 与 KernelSU-Next 是**成对钉定**的：SUSFS 取各分支 2026-08-11 的提交，KSU 取 234f6e04（KSUN 33239），"
+            echo "> 与上游 \`kernel_patches\` 的 v2.2.0 修复补丁严格对应。上游补出 v2.3.0 补丁后，把 \`susfs_ref\` 设为 \`latest\`、\`ksu_ref\` 改回 \`dev\` 即可。"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "::endgroup::"
