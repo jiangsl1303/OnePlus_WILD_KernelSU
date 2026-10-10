@@ -285,12 +285,16 @@ jobs:
             esac
           }
 
-          # 读取某个 ref 的 susfs.h 中声明的版本号
+          # 读取某个 ref 的 susfs.h 中声明的版本号（纯 bash 解析，避免管道 SIGPIPE 噪音）
           susfs_version_of() {
-            curl -fsSL --retry 2 --retry-delay 3 --max-time 40 \
+            local body
+            body=$(curl -fsSL --retry 2 --retry-delay 3 --max-time 40 \
               "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$1/kernel_patches/include/linux/susfs.h" \
-              2>/dev/null \
-              | tr -d '\r' | grep -m1 '#define SUSFS_VERSION' | awk -F'"' '{print $2}' || true
+              2>/dev/null || true)
+            body=${body//$'\r'/}
+            if [[ $body =~ \#define\ SUSFS_VERSION\ \"([^\"]*)\" ]]; then
+              printf '%s' "${BASH_REMATCH[1]}"
+            fi
           }
 
           declare -A susfs_map
