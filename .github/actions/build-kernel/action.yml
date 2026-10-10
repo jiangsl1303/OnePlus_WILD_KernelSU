@@ -800,21 +800,31 @@ runs:
               return 1
           fi
           
+          # 备用下载路径：GitLab API 归档端点。
+          # 实测 gitlab.com 的 WAF 对「声称是 Chrome 但 TLS 指纹是 curl/aria2c」的请求直接 403，
+          # 对 curl 默认 UA 放行；api/v4 归档端点则两种 UA 都放行，故作为第二路径。
+          local api_url=""
+          if [[ "$url" == *"gitlab.com"* ]]; then
+              local proj
+              proj=$(printf '%s' "$url" | sed -E 's#^https?://gitlab\.com/##; s#\.git$##' | sed 's#/#%2F#g')
+              api_url="https://gitlab.com/api/v4/projects/${proj}/repository/archive.tar.gz?sha=${branch}"
+          fi
+          
           while [ $attempt -le $max_attempts ]; do
               echo " Attempt $attempt/$max_attempts: Fetch for $repo_name ($branch)"
               
-              # 优先 curl，其次 aria2c。
-              # 原因：gitlab.com 的 WAF 会把 aria2c（多连接 + Range 请求指纹）判为机器人，
-              # 对同一 URL 直接返回 403（HttpSkipResponseCommand.cc:239 errorCode=22 status=403），
-              # 而 curl 请求同一 URL 正常 200。故先 curl，失败再退回 aria2c 兜底。
+              # 关键：不要覆盖 User-Agent！
+              # 实测同一 URL：curl 默认 UA → 200；-A "Mozilla/5.0 ... Chrome/120" → 403；
+              # aria2c（多连接 Range + 伪造 UA）→ 403。Cloudflare 会用「UA 声明 vs TLS 指纹」
+              # 不一致来判定机器人，所以这里保持 curl 默认 UA。
               local fetched=0
-              if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 \
-                    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                    -H "Accept: */*" \
-                    -o "$shm_path" "$download_url"; then
+              if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$shm_path" "$download_url"; then
                   fetched=1
                   echo "   ↳ curl ok ($(stat -c%s "$shm_path" 2>/dev/null || echo '?') bytes)"
-              elif aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
+              elif [ -n "$api_url" ] && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$shm_path" "$api_url"; then
+                  fetched=1
+                  echo "   ↳ curl(api/v4) ok ($(stat -c%s "$shm_path" 2>/dev/null || echo '?') bytes)"
+              elif aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true $aria_log_flags "$download_url"; then
                   fetched=1
                   echo "   ↳ aria2c ok"
               fi
