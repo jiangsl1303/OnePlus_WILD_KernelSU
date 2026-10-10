@@ -1,0 +1,43 @@
+name: probe-susfs2
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe UA / header combinations
+        shell: bash
+        run: |
+          set -uo pipefail
+          SHA12=077730110ca6
+          URL="https://gitlab.com/simonpunk/susfs4ksu/-/archive/$SHA12/susfs4ksu-$SHA12.tar.gz"
+          echo "URL=$URL"
+          t() {
+            local label="$1"; shift
+            local out
+            out=$(curl -sS -o /tmp/out.bin -w "%{http_code} %{size_download}" -L --max-time 60 "$@" "$URL" 2>&1) || out="ERR: $out"
+            echo "  [$out]  $label"
+          }
+          t "curl 默认 UA"
+          t "curl 默认 UA + Accept:*/*" -H "Accept: */*"
+          t "curl -A curl/8.9.1" -A "curl/8.9.1"
+          t "curl -A Chrome120" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          t "curl -A Chrome120 + Accept:*/*" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -H "Accept: */*"
+          t "curl -A Chrome120 + Accept + Conn" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -H "Accept: */*" -H "Connection: keep-alive"
+          t "curl --http1.1 默认UA" --http1.1
+          t "curl --compressed 默认UA" --compressed
+          t "curl 空UA (-A '')" -A ""
+          echo "### wget"
+          out=$(wget -q -O /tmp/w.bin --timeout=60 "$URL" 2>&1 && echo "ok $(stat -c%s /tmp/w.bin)" || echo "FAIL")
+          echo "  wget: $out"
+          echo "### api v4"
+          out=$(curl -sS -o /tmp/a.bin -w "%{http_code} %{size_download}" -L --max-time 60 "https://gitlab.com/api/v4/projects/simonpunk%2Fsusfs4ksu/repository/archive.tar.gz?sha=$SHA12" 2>&1) || out="ERR"
+          echo "  api v4 默认UA: $out"
+          out=$(curl -sS -o /tmp/a2.bin -w "%{http_code} %{size_download}" -L --max-time 60 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" "https://gitlab.com/api/v4/projects/simonpunk%2Fsusfs4ksu/repository/archive.tar.gz?sha=$SHA12" 2>&1) || out="ERR"
+          echo "  api v4 Chrome UA: $out"
+          echo "### 复测默认UA 3 次（看是否限流）"
+          for i in 1 2 3; do
+            out=$(curl -sS -o /dev/null -w "%{http_code}" -L --max-time 60 "$URL" 2>&1) || out="ERR"
+            echo "  try$i: $out"
+          done
