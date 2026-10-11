@@ -1,41 +1,25 @@
 --- a/kernel/runtime/ksud_integration.c
 +++ b/kernel/runtime/ksud_integration.c
-@@ -26,6 +26,7 @@
- #include "runtime/ksud_boot.h"
- #include "policy/feature.h"
- #include "selinux/selinux.h"
-+#include "hook/syscall_event_bridge.h"
- 
- DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
- DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
-@@ -131,7 +132,7 @@
-     return false;
- }
- 
--void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
-+static void ksu_handle_execveat_ksud_path(const char *path, struct user_arg_ptr *argv)
- {
-     static const char app_process[] = "/system/bin/app_process";
-     static bool first_zygote = true;
-@@ -544,3 +545,21 @@
+@@ -1,4 +1,5 @@
+ #include "feature/selinux_hide.h"
++#include <linux/jump_label.h>
+ #include <linux/rcupdate.h>
+ #include <linux/slab.h>
+ #include <linux/mm.h>
+@@ -544,3 +545,16 @@
          free_module_rc();
      }
  }
 +
 +/*
-+ * SUSFS 版 sucompat.c 以 5 参数形式调用本函数（声明在 runtime/ksud.h）。
-+ * SUSFS 集成补丁自带的 ksud_integration.c 还是旧的 2 参数实现，这里补一个
-+ * 5 参数包装：从 struct filename 取路径后转交原实现。
++ * ksu_stop_ksud_execve_hook 与 ksud_execve_key：
++ * 原始实现在 hook/syscall_event_bridge.c，但 SUSFS 主补丁从 Kbuild 里
++ * 删掉了该文件（该文件整体与新版 KernelSU-Next 不兼容）。这里把仅被
++ * selinux_hide.c 引用的 ksu_stop_ksud_execve_hook 抽出来放到 ksud_integration.c。
 + */
-+int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
-+                             struct user_arg_ptr *argv,
-+                             struct user_arg_ptr *envp, int *flags)
++DEFINE_STATIC_KEY_TRUE(ksud_execve_key);
++
++void ksu_stop_ksud_execve_hook(void)
 +{
-+    (void)fd;
-+    (void)envp;
-+    (void)flags;
-+    if (!filename_ptr || !*filename_ptr || argv == NULL)
-+        return 0;
-+    ksu_handle_execveat_ksud_path((*filename_ptr)->name, argv);
-+    return 0;
++    static_branch_disable(&ksud_execve_key);
 +}
