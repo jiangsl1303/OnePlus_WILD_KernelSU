@@ -271,6 +271,7 @@ jobs:
           # 这样 GKI 补丁引用的 fake_state、fake_status 等符号会有真实定义。
           KSU_PIN_33239="234f6e040fcbca18b16d2398e1aa225712ec99ad"
           KSU_OFFICIAL_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
+          KSU_SOURCE_REPO="https://github.com/pershoot/KernelSU-Next.git"
           if [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
             case "$SUSFS_MODE" in
               patched|source) KSU_REF="$KSU_PIN_33239" ;;
