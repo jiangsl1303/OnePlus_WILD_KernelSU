@@ -134,7 +134,10 @@ on:
         default: false
 
 concurrency:
-  group: oneplus-ksun-${{ github.ref }}-${{ inputs.device }}
+  # 按 (分支, 设备, KMI, SUSFS 方案) 分组：相同配置重复触发时只在组内排队/取消，
+  # 不同设备或不同 KMI 的全量 run 可以真正并行。
+  # （教训：曾只按 device 分组，多个 device=all 的全量 run 互相取消。）
+  group: oneplus-ksun-${{ github.ref }}-${{ inputs.device }}-${{ inputs.kmi_filter }}-${{ inputs.susfs_mode }}
   cancel-in-progress: false
 
 jobs:
