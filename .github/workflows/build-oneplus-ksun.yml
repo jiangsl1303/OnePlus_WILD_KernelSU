@@ -267,18 +267,14 @@ jobs:
           echo "共匹配到 $count 个设备配置。"
 
           # 4) 解析 KernelSU-Next 的 commit 与仓库。
-          # source 使用 pershoot 的 dev-susfs：该分支把 SUSFS 集成在 KSUN 内核树中，
-          # 可与最新 SUSFS GKI 源码补丁同步；其管理器仍从官方仓库单独获取。
+          # source 模式使用官方 KSUN；SUSFS 的 KSUN 集成由 action 统一应用，
+          # 这样 GKI 补丁引用的 fake_state、fake_status 等符号会有真实定义。
           KSU_PIN_33239="234f6e040fcbca18b16d2398e1aa225712ec99ad"
           KSU_OFFICIAL_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
-          KSU_SOURCE_REPO="https://github.com/pershoot/KernelSU-Next.git"
-          if [ "$SUSFS_MODE" = "source" ] && { [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; }; then
-            KSU_REF="dev-susfs"
-            KSU_REPO="$KSU_SOURCE_REPO"
-          elif [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
+          if [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
             case "$SUSFS_MODE" in
-              patched) KSU_REF="$KSU_PIN_33239" ;;
-              *)       KSU_REF="dev" ;;
+              patched|source) KSU_REF="$KSU_PIN_33239" ;;
+              *)              KSU_REF="dev" ;;
             esac
             KSU_REPO="$KSU_OFFICIAL_REPO"
           else
@@ -393,14 +389,18 @@ jobs:
             branch="gki-${key}"
             sha=""
             if [ "$SUSFS_MODE" = "source" ]; then
-              # source 模式：SUSFS v2.3.0 源码补丁直接编进内核。
-              # 补丁链在仓库 .github/patches/susfs-v23/，action.yml 已加 "v2.3.0" case。
-              # 默认跟随分支头（当前 v2.3.0）；也可用 susfs_ref 钉到指定 commit/分支。
+              # source 模式：直接将 SUSFS 源码补丁编进内核；当前可验证的
+              # KSUN 配对基线是 v2.2.0 + KSUN 33239。
               case "${SUSFS_REF:-auto}" in
-                ''|auto|latest|branch|head|pinned)
-                  sha="$branch"
+                ''|auto|pinned)
+                  sha="${SUSFS_V220[$key]:-$branch}"
                   ver=$(susfs_version_of "$sha")
-                  echo "SUSFS [$key] → 分支头 $branch${ver:+, 版本 $ver}（源码补丁模式，编进内核）"
+                  echo "SUSFS [$key] → 配对提交 $sha${ver:+, 版本 $ver}（源码补丁模式）"
+                  ;;
+                latest|branch|head)
+                  echo "::warning::source 模式当前不能直接使用 SUSFS 分支头；回退到 KSUN 配对提交。"
+                  sha="${SUSFS_V220[$key]:-$branch}"
+                  ver=$(susfs_version_of "$sha")
                   ;;
                 *)
                   sha="$SUSFS_REF"
