@@ -1,0 +1,13 @@
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -24,6 +24,10 @@
+ #include "feature/sulog.h"
+ #include "hook/setuid_hook.h"
+ #include "feature/sucompat.h"
++#include "hook/lsm_hook.h"
++#include "hook/syscall_hook.h"
++#include "hook/syscall_hook_manager.h"
++#include "infra/symbol_resolver.h"
+ 
+ // workaround for A12-5.10 kernel
+ // Some third-party kernel (e.g. linegaeOS) uses wrong toolchain, which supports
