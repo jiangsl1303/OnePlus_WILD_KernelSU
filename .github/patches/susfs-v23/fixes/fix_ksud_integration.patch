@@ -1,0 +1,41 @@
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -26,6 +26,7 @@
+ #include "runtime/ksud_boot.h"
+ #include "policy/feature.h"
+ #include "selinux/selinux.h"
++#include "hook/syscall_event_bridge.h"
+ 
+ DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
+ DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
+@@ -131,7 +132,7 @@
+     return false;
+ }
+ 
+-void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
++static void ksu_handle_execveat_ksud_path(const char *path, struct user_arg_ptr *argv)
+ {
+     static const char app_process[] = "/system/bin/app_process";
+     static bool first_zygote = true;
+@@ -544,3 +545,21 @@
+         free_module_rc();
+     }
+ }
++
++/*
++ * SUSFS 版 sucompat.c 以 5 参数形式调用本函数（声明在 runtime/ksud.h）。
++ * SUSFS 集成补丁自带的 ksud_integration.c 还是旧的 2 参数实现，这里补一个
++ * 5 参数包装：从 struct filename 取路径后转交原实现。
++ */
++int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
++                             struct user_arg_ptr *argv,
++                             struct user_arg_ptr *envp, int *flags)
++{
++    (void)fd;
++    (void)envp;
++    (void)flags;
++    if (!filename_ptr || !*filename_ptr || argv == NULL)
++        return 0;
++    ksu_handle_execveat_ksud_path((*filename_ptr)->name, argv);
++    return 0;
++}
