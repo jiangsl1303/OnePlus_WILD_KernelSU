@@ -439,31 +439,37 @@ jobs:
             if [ "$SUSFS_MODE" = "source" ]; then
               # source 模式走 WildKernels next flavor 同款组合：
               #   pershoot/KernelSU-Next dev-susfs（KSUN 侧集成，见上面 4) 的说明）
-              #   + pershoot/susfs4ksu 的 gki-<key>-dev 分支
-              # 后者 = simonpunk/susfs4ksu 的 gki-<key> 分支头 + 2 条提交
-              # （"Allow core to be built with no features" / "Implement SuSFS and
-              #   Toolkit coexistence"，均只改 kernel_patches/fs/susfs.c）。
-              # 实测 2026-10-12：simonpunk 分支头 17dc6b68 与钉定 v2.3.0（24743360）的
-              # include/linux 目录完全一致；pershoot dev 头 fb0f1f7d 在其之上。
+              #   + SUSFS 源码：优先 pershoot/susfs4ksu 的 gki-<key>-dev 分支；
+              #     pershoot 未覆盖的 KMI（截至 2026-10-12 只有 android14-6.1）
+              #     回退 simonpunk/susfs4ksu 的 gki-<key> 稳定分支。
+              # pershoot dev 相对 simonpunk 6.1 分支只多 2 条 fs/susfs.c 小改动
+              # （__maybe_unused 注解 / uname spoof 的 static_key 禁用逻辑），
+              # 非符号冲突类；simonpunk 各 KMI 分支头实测均为 v2.3.0。
               SUSFS_SOURCE_PROJECT="pershoot/susfs4ksu"
               case "${SUSFS_REF:-auto}" in
                 ''|auto|latest|dev|branch|head)
                   sha=$(git ls-remote "https://gitlab.com/${SUSFS_SOURCE_PROJECT}.git" \
                         "refs/heads/${branch}-dev" 2>/dev/null | cut -f1 | cut -c1-12 || true)
+                  if [ -z "$sha" ]; then
+                    echo "::notice::pershoot/susfs4ksu 无 ${branch}-dev 分支，回退 simonpunk/susfs4ksu 的 ${branch} 分支。"
+                    SUSFS_SOURCE_PROJECT="simonpunk/susfs4ksu"
+                    sha=$(git ls-remote "https://gitlab.com/${SUSFS_SOURCE_PROJECT}.git" \
+                          "refs/heads/${branch}" 2>/dev/null | cut -f1 | cut -c1-12 || true)
+                  fi
                   ;;
                 *)
                   sha="$SUSFS_REF"
                   ;;
               esac
               if [ -z "$sha" ]; then
-                echo "::error::无法解析 pershoot/susfs4ksu 的 ${branch}-dev 分支头；请检查网络或显式指定 susfs_ref。"
+                echo "::error::无法解析 ${SUSFS_SOURCE_PROJECT} 的 ${branch}[-dev] 分支头；请检查网络或显式指定 susfs_ref。"
                 exit 1
               fi
               ver=$(susfs_version_of "$SUSFS_SOURCE_PROJECT" "$sha")
-              [ "$ver" = "v2.3.0" ] || { echo "::error::source 模式要求 SUSFS v2.3.0，实际为 ${ver:-unknown} (pershoot/susfs4ksu $sha)"; exit 1; }
+              [ "$ver" = "v2.3.0" ] || { echo "::error::source 模式要求 SUSFS v2.3.0，实际为 ${ver:-unknown} (${SUSFS_SOURCE_PROJECT} $sha)"; exit 1; }
               susfs_map["$key"]="$sha"
               susfs_repo_map["$key"]="https://gitlab.com/${SUSFS_SOURCE_PROJECT}.git"
-              echo "SUSFS [$key] → pershoot/susfs4ksu@${sha}（${branch}-dev 分支头，实测 $ver）"
+              echo "SUSFS [$key] → ${SUSFS_SOURCE_PROJECT}@${sha}（分支头，实测 $ver）"
               continue
             fi
             case "${SUSFS_REF:-auto}" in
