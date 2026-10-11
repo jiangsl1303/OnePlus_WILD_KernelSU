@@ -1,1 +1,1 @@
-# Superseded by fix_ksud_integration.py
+# All ksud_integration.c fixes are now applied inline in action.yml via Python script
