@@ -42,22 +42,39 @@ on:
           - A16
         default: 'auto'
 
+      susfs_mode:
+        description: >-
+          SUSFS 方案：
+          lkm（推荐）= 内核用最新 KernelSU-Next（不打任何 SUSFS 源码补丁）
+          + 额外产出一个 SUSFS v2.3.0 可加载模块（KernelSU 模块 zip，由 ksud 加载）；
+          patched = 传统源码补丁方案（SUSFS 与 KernelSU-Next 成对钉定，
+          当前可用组合为 SUSFS v2.2.0 + KSUN 33239）；
+          none = 只带 KernelSU-Next，完全不带 SUSFS。
+        required: true
+        type: choice
+        options:
+          - lkm
+          - patched
+          - none
+        default: 'lkm'
+
       ksu_ref:
         description: >-
-          KernelSU-Next 分支或 commit。默认钉到 234f6e04（= KSUN 33239），
-          因为上游 kernel_patches 的 SUSFS v2.2.0 修复补丁只适配到该版本；
-          填 dev 会取到过新的 KernelSU-Next，导致 SUSFS 修复补丁打不上而失败。
+          KernelSU-Next 分支或 commit。auto(默认) = 按 susfs_mode 自动选择：
+          lkm/none → dev（最新）；patched → 234f6e04（= KSUN 33239，
+          与上游 kernel_patches 的 SUSFS v2.2.0 修复补丁严格配对）。
+          也可直接填分支名或 commit。
         required: true
         type: string
-        default: '234f6e040fcbca18b16d2398e1aa225712ec99ad'
+        default: 'auto'
 
       susfs_ref:
         description: >-
-          SUSFS 源码引用。auto(默认) = 钉到各内核分支 2026-08-11 的提交
-          （与 kernel_patches 的 v2.2.0 修复补丁、KSUN 33239 严格配对；取分支头
-          会因 v2.3.0 报 Unsupported SUSFS version，取更晚的 v2.2.0 提交会因
-          .rej 文件没有对应 fix_*.patch 而失败）；latest = 跟随分支头；
-          也可直接填 40 位 commit 或分支名。
+          仅 susfs_mode=patched 时生效。SUSFS 源码引用。auto(默认) = 钉到各内核
+          分支 2026-08-11 的提交（与 kernel_patches 的 v2.2.0 修复补丁、KSUN 33239
+          严格配对；取分支头会因 v2.3.0 报 Unsupported SUSFS version，取更晚的
+          v2.2.0 提交会因 .rej 文件没有对应 fix_*.patch 而失败）；latest = 跟随
+          分支头；也可直接填 40 位 commit 或分支名。
         required: true
         type: string
         default: 'auto'
@@ -138,6 +155,7 @@ jobs:
           AV_INPUT: ${{ inputs.android_version }}
           KSU_REF: ${{ inputs.ksu_ref }}
           SUSFS_REF: ${{ inputs.susfs_ref }}
+          SUSFS_MODE: ${{ inputs.susfs_mode }}
         run: |
           set -euo pipefail
           echo "::group::Generate matrix"
@@ -242,6 +260,19 @@ jobs:
           echo "共匹配到 $count 个设备配置。"
 
           # 4) 解析 KernelSU-Next 的 commit（保证可复现）
+          #
+          #    ksu_ref=auto 时按 susfs_mode 决定：
+          #      lkm / none → dev（最新 KernelSU-Next，不打 SUSFS 源码补丁）
+          #      patched    → 234f6e04（KSUN 33239，与 SUSFS v2.2.0 修复补丁配对）
+          KSU_PIN_33239="234f6e040fcbca18b16d2398e1aa225712ec99ad"
+          if [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
+            case "$SUSFS_MODE" in
+              patched) KSU_REF="$KSU_PIN_33239" ;;
+              *)       KSU_REF="dev" ;;
+            esac
+            echo "ksu_ref=auto → 按 susfs_mode=$SUSFS_MODE 选用 $KSU_REF"
+          fi
+
           echo "解析 KernelSU-Next ref: $KSU_REF ..."
           ksu_resolved=""
           for i in 1 2 3; do
@@ -259,19 +290,22 @@ jobs:
           fi
           echo "KernelSU-Next → $ksu_resolved"
 
-          # 4.1) 提示：KernelSU-Next 版本必须与 SUSFS 修复补丁集匹配
+          # 4.1) 提示：源码补丁模式下 KernelSU-Next 版本必须与 SUSFS 修复补丁集匹配
           #      上游 kernel_patches 的 v2.2.0 修复补丁是按 KSUN 33239 生成的
           #      （见其提交信息 “Update KSUN 33239 SusFS 2.2.0 + KSU_Toolkit”）。
           #      KernelSU-Next 更新后，10_enable_susfs_for_ksu.patch 会产生新的 .rej 文件，
           #      而对应 fix_*.patch 不存在，导致构建报
           #      “fix_xxx.patch: No such file or directory” 而失败。
-          case "$KSU_REF" in
-            dev|latest|main|next|HEAD|master)
-              if [ "${SUSFS_REF:-auto}" != "latest" ]; then
-                echo "::warning::ksu_ref=$KSU_REF 是滚动分支，版本可能已超过 KSUN 33239；SUSFS v2.2.0 修复补丁只适配到 33239。若构建失败，请改用默认值 234f6e040fcbca18b16d2398e1aa225712ec99ad。"
-              fi
-              ;;
-          esac
+          #      lkm / none 模式不打 SUSFS 源码补丁，因此不受此约束。
+          if [ "$SUSFS_MODE" = "patched" ]; then
+            case "$KSU_REF" in
+              dev|latest|main|next|HEAD|master)
+                if [ "${SUSFS_REF:-auto}" != "latest" ]; then
+                  echo "::warning::ksu_ref=$KSU_REF 是滚动分支，版本可能已超过 KSUN 33239；SUSFS v2.2.0 修复补丁只适配到 33239。若构建失败，请改用默认值 $KSU_PIN_33239，或把 susfs_mode 换成 lkm。"
+                fi
+                ;;
+            esac
+          fi
 
           # 5) 解析每个内核版本对应的 SUSFS 引用
           #
@@ -328,10 +362,15 @@ jobs:
           }
 
           declare -A susfs_map
-          mapfile -t active_keys < <(
-            jq -r '[.[] | select(.susfs == true) | "\(.android_version)-\(.kernel_version)"] | unique | .[]' \
-              /tmp/stage2.json | tr -d '\r'
-          )
+          if [ "$SUSFS_MODE" = "patched" ]; then
+            mapfile -t active_keys < <(
+              jq -r '[.[] | select(.susfs == true) | "\(.android_version)-\(.kernel_version)"] | unique | .[]' \
+                /tmp/stage2.json | tr -d '\r'
+            )
+          else
+            active_keys=()
+            echo "susfs_mode=$SUSFS_MODE → 内核不打任何 SUSFS 源码补丁，全部设备按 susfs=false 构建。"
+          fi
           for key in "${active_keys[@]}"; do
             branch="gki-${key}"
             sha=""
@@ -367,9 +406,17 @@ jobs:
           done
 
           # 6) 注入 ksu / susfs 字段，生成最终 matrix
-          jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
-            'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh})' \
-            /tmp/stage2.json > /tmp/final.json
+          #    lkm / none：强制 susfs=false，action 的 “Apply SUSFS Patches” 步骤会被整体跳过
+          if [ "$SUSFS_MODE" = "patched" ]; then
+            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
+              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh})' \
+              /tmp/stage2.json > /tmp/final.json
+          else
+            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
+              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh,
+                        susfs: false, susfs_resolved_hash: ""})' \
+              /tmp/stage2.json > /tmp/final.json
+          fi
 
           for key in "${!susfs_map[@]}"; do
             jq -c --arg k "$key" --arg s "${susfs_map[$key]}" \
@@ -382,7 +429,11 @@ jobs:
           jq -c '{include: .}' /tmp/final.json > /tmp/matrix.json
           matrix_json=$(cat /tmp/matrix.json)
 
+          # 本次运行涉及的 KMI 列表（如 android14-6.1），供 LKM 打包 job 使用
+          kmi_list=$(jq -r '[.[] | "\(.android_version)-\(.kernel_version)"] | unique | join(",")' /tmp/final.json)
+
           echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "kmi_list=$kmi_list" >> "$GITHUB_OUTPUT"
           {
             echo "matrix<<MATRIX_EOF"
             echo "$matrix_json"
@@ -397,8 +448,22 @@ jobs:
             echo "|------|----|------|-----|------|-----|-------|"
             jq -r '.[] | "| \(.model) | \(.os_version) | \(.android_version)-\(.kernel_version) | \(.soc) | \(.branch) | KSUN | `\(.susfs_resolved_hash)` |"' /tmp/final.json
             echo ""
-            echo "> SUSFS 与 KernelSU-Next 是**成对钉定**的：SUSFS 取各分支 2026-08-11 的提交，KSU 取 234f6e04（KSUN 33239），"
-            echo "> 与上游 \`kernel_patches\` 的 v2.2.0 修复补丁严格对应。上游补出 v2.3.0 补丁后，把 \`susfs_ref\` 设为 \`latest\`、\`ksu_ref\` 改回 \`dev\` 即可。"
+            case "$SUSFS_MODE" in
+              patched)
+                echo "> **源码补丁模式**：SUSFS 与 KernelSU-Next 是**成对钉定**的 —— SUSFS 取各分支 2026-08-11 的提交，"
+                echo "> KSU 取 234f6e04（KSUN 33239），与上游 \`kernel_patches\` 的 v2.2.0 修复补丁严格对应。"
+                echo "> 上游补出 v2.3.0 补丁后，把 \`susfs_ref\` 设为 \`latest\`、\`ksu_ref\` 改回 \`dev\` 即可。"
+                ;;
+              lkm)
+                echo "> **LKM 模式**：内核使用最新 KernelSU-Next（\`$ksu_resolved\`），**不打任何 SUSFS 源码补丁**；"
+                echo "> SUSFS 由额外产出的 \`SUSFS-LKM-*.zip\` 提供（SUSFS v2.3.0 可加载内核模块，经 KernelSU \`ksud insmod\` 加载）。"
+                echo "> 刷入顺序：先刷 AK3 内核包并重启 → 再在 KernelSU 管理器里安装 LKM 模块 zip → 再重启。"
+                echo "> 涉及的 KMI：\`$kmi_list\`"
+                ;;
+              none)
+                echo "> **无 SUSFS 模式**：只构建带 KernelSU-Next（\`$ksu_resolved\`）的内核，不打任何 SUSFS 补丁。"
+                ;;
+            esac
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "::endgroup::"
@@ -510,18 +575,353 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
+  # Job 2.5: 打包 SUSFS LKM 内核模块（susfs_mode=lkm 时）
+  #
+  #   SUSFS v2.3.0 以「可加载内核模块（.ko）」形式提供，由 KernelSU 的 ksud/loader
+  #   在开机 post-fs-data 阶段加载。因此内核侧完全不需要打 SUSFS 源码补丁 ——
+  #   这就是「最新内核 + 新 SUSFS」的解法，绕开了 kernel_patches 只到 v2.2.0 的限制。
+  #
+  #   产物是一个 KernelSU 模块 zip（不是 AK3 刷机包）：
+  #     1. 先刷 AK3 内核包并重启
+  #     2. 在 KernelSU 管理器里安装本模块 zip 并重启
+  # ===========================================================================
+  lkm:
+    name: Package SUSFS LKM
+    needs: resolve
+    if: ${{ needs.resolve.result == 'success' && inputs.susfs_mode == 'lkm' }}
+    runs-on: ubuntu-latest
+    outputs:
+      lkm_zip: ${{ steps.assemble.outputs.lkm_zip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download pinned LKM assets
+        shell: bash
+        env:
+          LKM_REPO: inforcqb/susfs4ksu-lkm
+          LKM_TAG: v2.3.0-r18
+        run: |
+          set -euo pipefail
+          echo "::group::Download $LKM_REPO $LKM_TAG"
+          mkdir -p build/lib build/bin
+          BASE="https://github.com/${LKM_REPO}/releases/download/${LKM_TAG}"
+
+          # 文件名 | SHA-256（取自上游 release 的 asset digest，全部逐一下载后校验）
+          cat > /tmp/assets.txt <<'EOF'
+          susfs_guard_lkm-android12-5.10.ko|2919828c6322a93f54240abb6e088906719f39a7d90d90a5446ba6cef1d18b62
+          susfs_guard_lkm-android13-5.10.ko|83335a3a0cf416e1e0088b5618f81798806cff163e6cdcc77c82187bb436796e
+          susfs_guard_lkm-android13-5.15.ko|51e1a7bfe138e48c43aea1007959ad8b3a89d7f0273e1cd71d15ddfbf92a996a
+          susfs_guard_lkm-android14-5.15.ko|938f1ab237880f71a23605345feb5125a02a21760852d719fd4c973cd6778a4d
+          susfs_guard_lkm-android14-6.1.ko|348223dad43bb7282769a8908228001bf6f6ae69deab3594b8265247a533d004
+          susfs_guard_lkm-android15-6.6.ko|83d580007d727bcff584ae82abd5a3e33acad58f46245738946c9fcbb52993ac
+          susfs_guard_lkm-android16-6.12.ko|c108e630882c9d99b2a61f0419626477ae65ccf427d4e53ed327f4259b460edf
+          susfs_guard_lkm-android17-6.18.ko|42072deda243ce7ee7a1f0979339cd553464cd52a4a49697f9e7b3937c167875
+          susfs_insmod|2c23e2259d5ad4d324add01caa6e0d9a03d0e34ee7f112237176568d12630608
+          EOF
+
+          total=0
+          while IFS='|' read -r name sha; do
+            [ -z "${name:-}" ] && continue
+            case "$name" in
+              *.ko) dest="build/lib/$name" ;;
+              *)    dest="build/bin/$name" ;;
+            esac
+            ok=0
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-all-errors --max-time 300 -o "$dest" "$BASE/$name"; then ok=1; break; fi
+              echo "  第 $attempt 次下载 $name 失败，重试..."
+              sleep 5
+            done
+            [ "$ok" = 1 ] || { echo "::error::无法下载 $name"; exit 1; }
+            got=$(sha256sum "$dest" | awk '{print $1}')
+            if [ "$got" != "$sha" ]; then
+              echo "::error::SHA-256 校验失败: $name 期望 $sha 实际 $got"
+              exit 1
+            fi
+            chmod 0755 "$dest"
+            sz=$(stat -c%s "$dest")
+            total=$((total + sz))
+            echo "  ✅ $name  ${sz} bytes  sha256=${got:0:16}…"
+          done < /tmp/assets.txt
+
+          echo "共 $(ls build/lib/*.ko | wc -l) 个 .ko + loader，合计 $((total / 1048576)) MB"
+          echo "LKM_TAG=${LKM_TAG}" >> "$GITHUB_ENV"
+          echo "::endgroup::"
+
+      - name: Compile SUSFS absence probe (arm64, NDK)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Build susfs_probe"
+          cat > build/susfs_probe.c <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0-only
+          // Independent read-only wire probe. Existing/unknown implementations are never stacked.
+          // 来源：https://github.com/matsuzaka-yuki/susfs-lkm-module (tools/susfs_probe.c, GPL-2.0-only)
+          #include <errno.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+
+          struct text_reply { char text[16]; int err; };
+
+          int main(void)
+          {
+              if (geteuid() != 0) return 12;
+              const unsigned commands[] = {0x555e1, 0x555e3};
+              for (unsigned i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+                  struct text_reply reply = { .text = {0}, .err = 126 };
+                  errno = 0;
+                  long result = syscall(SYS_reboot, 0xdeadbeefU, 0xfafafafaU, commands[i], &reply);
+                  if (reply.err != 126 || reply.text[0] != '\0') {
+                      puts("Existing SUSFS control interface detected (not a compatibility guarantee).");
+                      return 0;
+                  }
+                  if (result == -1 && errno != EINVAL && errno != ENOSYS) return 12;
+              }
+              puts("No responding SUSFS version/variant interface.");
+              return 10;
+          }
+          EOF
+
+          # 找 NDK
+          NDK=""
+          for cand in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK:-}"; do
+            [ -n "$cand" ] && [ -d "$cand" ] && { NDK="$cand"; break; }
+          done
+          if [ -z "$NDK" ]; then
+            for base in "${ANDROID_HOME:-/usr/local/lib/android/sdk}" /usr/local/lib/android/sdk; do
+              [ -d "$base/ndk" ] || continue
+              NDK=$(find "$base/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+              [ -n "$NDK" ] && break
+            done
+          fi
+
+          if [ -n "$NDK" ] && [ -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" ]; then
+            echo "使用 NDK: $NDK"
+            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" \
+              -O2 -Wall -Wextra -fPIE -pie build/susfs_probe.c -o build/bin/susfs_probe
+            chmod 0755 build/bin/susfs_probe
+            file build/bin/susfs_probe
+            echo "PROBE_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::未找到 NDK，退化为 shell 版探测（只查 /proc 节点，可靠性略低）"
+            cat > build/bin/susfs_probe <<'EOF'
+          #!/system/bin/sh
+          # 退化探测：只看 SUSFS 的 /proc 控制节点是否已存在
+          for f in /proc/susfs_path /proc/susfs_kstat /proc/susfs_open_redirect \
+                   /proc/susfs_hide_mounts /proc/susfs_avc_spoof; do
+            [ -e "$f" ] && { echo "Existing SUSFS control interface detected."; exit 0; }
+          done
+          echo "No responding SUSFS version/variant interface."
+          exit 10
+          EOF
+            chmod 0755 build/bin/susfs_probe
+            echo "PROBE_OK=0" >> "$GITHUB_ENV"
+          fi
+          echo "::endgroup::"
+
+      - name: Assemble KernelSU module zip
+        id: assemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Assemble module"
+          MOD=build/module
+          rm -rf "$MOD"
+          mkdir -p "$MOD/bin" "$MOD/lib"
+          mv build/bin/* "$MOD/bin/"
+          mv build/lib/*.ko "$MOD/lib/"
+
+          # ---- module.prop ----
+          cat > "$MOD/module.prop" <<'EOF'
+          id=susfs_lkm_loader
+          name=SUSFS LKM (v2.3.0)
+          version=v2.3.0-r18
+          versionCode=18
+          author=inforcqb (LKM) / matsuzaka-yuki (loader) / packaged by opbuild
+          description=SUSFS v2.3.0 as a loadable kernel module, loaded via KernelSU ksud at post-fs-data. Kernel-side SUSFS source patches are NOT required, so it pairs with any KernelSU-Next kernel. Reboot required.
+          EOF
+
+          # ---- kmi.sh：按真实 osrelease 选 .ko ----
+          cat > "$MOD/kmi.sh" <<'EOF'
+          # SPDX-License-Identifier: GPL-2.0-only
+          # 按 /proc/sys/kernel/osrelease 的真实值选 KMI（不信任可能已被伪装的 uname）
+          select_kmi() {
+            case "$1" in
+              5.10.*-android12-*) echo android12-5.10 ;;
+              5.10.*-android13-*) echo android13-5.10 ;;
+              5.15.*-android13-*) echo android13-5.15 ;;
+              5.15.*-android14-*) echo android14-5.15 ;;
+              6.1.*-android14-*)  echo android14-6.1 ;;
+              6.6.*-android15-*)  echo android15-6.6 ;;
+              6.12.*-android16-*) echo android16-6.12 ;;
+              6.18.*-android17-*) echo android17-6.18 ;;
+              *) return 1 ;;
+            esac
+          }
+          EOF
+
+          # ---- customize.sh：安装期只做校验，不加载 ----
+          cat > "$MOD/customize.sh" <<'EOF'
+          #!/system/bin/sh
+          # SPDX-License-Identifier: GPL-2.0-only
+          [ "$KSU" = true ] || abort "KernelSU 系管理器才能安装本模块（Magisk 不支持）。"
+          [ "$ARCH" = arm64 ] || abort "本模块只打包了 arm64。"
+          REAL_KERNEL=$(cat /proc/sys/kernel/osrelease) || abort "读不到 /proc/sys/kernel/osrelease。"
+          . "$MODPATH/kmi.sh" || abort "缺少 kmi.sh。"
+          KMI=$(select_kmi "$REAL_KERNEL") || abort "不支持的内核 KMI: $REAL_KERNEL"
+          [ -s "$MODPATH/lib/susfs_guard_lkm-$KMI.ko" ] || abort "缺少 $KMI 对应的 .ko。"
+          chmod 0755 "$MODPATH/post-fs-data.sh" "$MODPATH/bin/susfs_insmod" "$MODPATH/bin/susfs_probe"
+          chmod 0644 "$MODPATH/module.prop" "$MODPATH/kmi.sh"
+          chmod 0644 "$MODPATH"/lib/*.ko
+          touch "$MODPATH/skip_mount"
+          ui_print "- 只安装加载器，安装时不加载任何东西。"
+          ui_print "- 匹配到的内核 KMI: $KMI (arm64)。厂商 ABI 差异仍可能导致加载失败。"
+          ui_print "- 重启后生效；停用/卸载同样重启后生效。"
+          ui_print "- 检测到已有 SUSFS 时不会叠加，也不会卸载它。"
+          EOF
+
+          # ---- post-fs-data.sh：开机加载 ----
+          cat > "$MOD/post-fs-data.sh" <<'EOF'
+          #!/system/bin/sh
+          # SPDX-License-Identifier: GPL-2.0-only
+          MODDIR=${0%/*}
+          [ ! -f "$MODDIR/disable" ] && [ ! -f "$MODDIR/remove" ] || exit 0
+          umask 077
+          exec > "$MODDIR/load.log" 2>&1
+          echo "SUSFS LKM loader: $(date)"
+
+          # uname 可能已被别的 SUSFS 实现伪装，这里读真实 release
+          REAL_KERNEL=$(cat /proc/sys/kernel/osrelease) || exit 1
+          . "$MODDIR/kmi.sh" || { echo "缺少 kmi.sh。"; exit 1; }
+          KMI=$(select_kmi "$REAL_KERNEL") || { echo "拒绝不支持的内核: $REAL_KERNEL"; exit 1; }
+          LKM="$MODDIR/lib/susfs_guard_lkm-$KMI.ko"
+          [ -s "$LKM" ] || { echo "缺少 $KMI 的 .ko。"; exit 1; }
+          echo "kernel=$REAL_KERNEL  kmi=$KMI"
+
+          # 1) 先确认当前没有 SUSFS 在跑，避免叠加
+          if [ -x "$MODDIR/bin/susfs_probe" ]; then
+            "$MODDIR/bin/susfs_probe"
+            rc=$?
+          else
+            echo "探测器缺失，退化查 /proc 节点"
+            rc=10
+            for f in /proc/susfs_path /proc/susfs_kstat /proc/susfs_open_redirect /proc/susfs_hide_mounts; do
+              [ -e "$f" ] && { rc=0; break; }
+            done
+          fi
+          case "$rc" in
+            0) echo "检测到已有 SUSFS，保持原样不动。"; exit 0 ;;
+            10) ;;
+            *) echo "无法确认 SUSFS 不存在（probe=$rc），拒绝加载。"; exit 1 ;;
+          esac
+
+          # 2) 加载：优先用上游 loader，退化为 ksud insmod
+          if [ -x "$MODDIR/bin/susfs_insmod" ]; then
+            "$MODDIR/bin/susfs_insmod" "$LKM" expose_proc=1
+            rc=$?
+            echo "susfs_insmod 退出码=$rc"
+          else
+            rc=127
+          fi
+          if [ "$rc" != 0 ]; then
+            if command -v ksud >/dev/null 2>&1; then
+              echo "回退到 ksud insmod"
+              ksud insmod "$LKM"
+              rc=$?
+              echo "ksud insmod 退出码=$rc"
+            fi
+          fi
+          [ "$rc" = 0 ] || { echo "加载失败: $rc"; exit "$rc"; }
+
+          # 3) 复检
+          if [ -x "$MODDIR/bin/susfs_probe" ]; then
+            "$MODDIR/bin/susfs_probe" || { echo "加载返回成功但协议复检失败。"; exit 1; }
+          fi
+          echo "SUSFS LKM 已加载。本模块不应用任何规则。"
+          EOF
+
+          chmod 0755 "$MOD"/customize.sh "$MOD"/post-fs-data.sh "$MOD"/bin/*
+
+          LKM_ZIP="SUSFS-LKM-${LKM_TAG}-arm64-multi-kmi.zip"
+          rm -f "$LKM_ZIP"
+          ( cd "$MOD" && zip -r -9 "../../$LKM_ZIP" . -x '.*' > /dev/null )
+          echo "产物: $LKM_ZIP  $(stat -c%s "$LKM_ZIP") bytes"
+          sha256sum "$LKM_ZIP"
+          echo "--- 包内清单 ---"
+          unzip -l "$LKM_ZIP"
+          echo "lkm_zip=$LKM_ZIP" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: Verify module zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          Z="${{ steps.assemble.outputs.lkm_zip }}"
+          echo "::group::Verify $Z"
+          # module.prop 必须在根
+          unzip -l "$Z" | grep -qE '(^| )module\.prop$' || { echo "::error::缺 module.prop"; exit 1; }
+          unzip -l "$Z" | grep -qE '(^| )customize\.sh$' || { echo "::error::缺 customize.sh"; exit 1; }
+          unzip -l "$Z" | grep -qE '(^| )post-fs-data\.sh$' || { echo "::error::缺 post-fs-data.sh"; exit 1; }
+          unzip -l "$Z" | grep -qE '(^| )kmi.sh$' || { echo "::error::缺 kmi.sh"; exit 1; }
+          unzip -l "$Z" | grep -qE '(^| )bin/susfs_insmod$' || { echo "::error::缺 bin/susfs_insmod"; exit 1; }
+          unzip -l "$Z" | grep -qE '(^| )bin/susfs_probe$' || { echo "::error::缺 bin/susfs_probe"; exit 1; }
+          n=$(unzip -l "$Z" | grep -cE 'lib/susfs_guard_lkm-.*\.ko$' || true)
+          echo "打包的 .ko 数量: $n"
+          [ "$n" -ge 1 ] || { echo "::error::一个 .ko 都没打进去"; exit 1; }
+          # 语法自检
+          mkdir -p /tmp/modchk && rm -rf /tmp/modchk/* && unzip -q "$Z" -d /tmp/modchk
+          sh -n /tmp/modchk/kmi.sh
+          sh -n /tmp/modchk/customize.sh
+          sh -n /tmp/modchk/post-fs-data.sh
+          echo "shell 语法自检通过"
+          echo "::endgroup::"
+
+      - name: Upload LKM module
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.assemble.outputs.lkm_zip }}
+          path: ${{ steps.assemble.outputs.lkm_zip }}
+          archive: false
+          compression-level: 0
+          retention-days: 90
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "### SUSFS LKM 模块 — ${{ job.status == 'success' && '✅ 已打包' || '❌ 失败' }}"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|------|-----|"
+            echo "| SUSFS 版本 | v2.3.0（LKM 形式） |"
+            echo "| 上游 | \`inforcqb/susfs4ksu-lkm\` @ \`v2.3.0-r18\` |"
+            echo "| 产物 | \`${{ steps.assemble.outputs.lkm_zip }}\` |"
+            echo "| 覆盖 KMI | 8 个（5.10 / 5.15 / 6.1 / 6.6 / 6.12 / 6.18） |"
+            echo ""
+            echo "刷入顺序：AK3 内核包 → 重启 → KernelSU 管理器安装本模块 zip → 重启。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
   # Job 3: 可选 —— 创建 Release
   # ===========================================================================
   release:
     name: Create release
-    needs: [resolve, build]
-    if: ${{ !cancelled() && inputs.make_release && needs.build.result == 'success' }}
+    needs: [resolve, build, lkm]
+    if: >-
+      ${{ !cancelled() && inputs.make_release && needs.build.result == 'success'
+          && (needs.lkm.result == 'success' || needs.lkm.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Download all AK3 artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./ak3
+          path: ./all
           merge-multiple: true
 
       - name: Publish release
@@ -529,24 +929,46 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          mkdir -p ./ak3 ./lkm
+          find ./all -maxdepth 1 -name 'AK3_*.zip' -exec cp {} ./ak3/ \; 2>/dev/null || true
+          find ./all -maxdepth 1 -name 'SUSFS-LKM-*.zip' -exec cp {} ./lkm/ \; 2>/dev/null || true
+
           TAG="op-ksun-$(date -u +%Y%m%d-%H%M%S)"
           COUNT=$(find ./ak3 -maxdepth 1 -name '*.zip' | wc -l)
-          echo "共 $COUNT 个 AK3 包"
-          find ./ak3 -maxdepth 1 -name '*.zip' -printf '%f  (%s bytes)\n' | sort
+          LCOUNT=$(find ./lkm -maxdepth 1 -name '*.zip' | wc -l)
+          echo "AK3 包 $COUNT 个，LKM 模块 $LCOUNT 个"
+          find ./ak3 ./lkm -maxdepth 1 -name '*.zip' -printf '%f  (%s bytes)\n' | sort
 
           {
             echo "# OnePlus KernelSU-Next 构建"
             echo ""
-            echo "**触发参数**：device=\`${{ inputs.device }}\` / android=\`${{ inputs.android_version }}\` / ksu_ref=\`${{ inputs.ksu_ref }}\` / optimize=\`${{ inputs.optimize_level }}\`"
+            echo "**触发参数**：device=\`${{ inputs.device }}\` / android=\`${{ inputs.android_version }}\` / susfs_mode=\`${{ inputs.susfs_mode }}\` / ksu_ref=\`${{ inputs.ksu_ref }}\` / optimize=\`${{ inputs.optimize_level }}\`"
             echo ""
-            echo "**产物数量**：$COUNT"
+            if [ "$LCOUNT" -gt 0 ]; then
+              echo "> **LKM 模式**：内核使用最新 KernelSU-Next（不打 SUSFS 源码补丁），SUSFS 由下面的模块 zip 提供。"
+              echo "> 刷入顺序：先刷 AK3 内核包 → 重启 → 在 KernelSU 管理器安装 LKM 模块 zip → 重启。"
+              echo ""
+            fi
+            echo "**AK3 内核包**（$COUNT 个）"
             echo ""
             echo "| 文件 |"
             echo "|------|"
             find ./ak3 -maxdepth 1 -name '*.zip' -printf '| `%f` |\n' | sort
+            if [ "$LCOUNT" -gt 0 ]; then
+              echo ""
+              echo "**SUSFS LKM 模块**（$LCOUNT 个）"
+              echo ""
+              echo "| 文件 |"
+              echo "|------|"
+              find ./lkm -maxdepth 1 -name '*.zip' -printf '| `%f` |\n' | sort
+            fi
           } > release_notes.md
+
+          ASSETS=()
+          while IFS= read -r f; do [ -n "$f" ] && ASSETS+=("$f"); done < <(find ./ak3 ./lkm -maxdepth 1 -name '*.zip' | sort)
+          [ ${#ASSETS[@]} -gt 0 ] || { echo "::error::没有任何产物可发布"; exit 1; }
 
           gh release create "$TAG" \
             --title "OnePlus KernelSU-Next (${{ inputs.device }}) $TAG" \
             --notes-file release_notes.md \
-            ./ak3/*.zip
+            "${ASSETS[@]}"
