@@ -1165,6 +1165,12 @@ runs:
                 echo "Patching with $(basename "$f")"
                 patch -p1 --forward < "$f" || true
               done
+              # SUSFS 主补丁从 Kbuild 删掉了 hook/syscall_event_bridge.c（整体不兼容新版 KSUN），
+              # 但 selinux_hide.c 仍引用其中的 ksu_stop_ksud_execve_hook。
+              # 另外 sucompat.c 现在以 5 参数调用 ksu_handle_execveat_ksud，而
+              # ksud_integration.c 里还是旧的 2 参数实现。
+              # 用独立 Python 脚本做文本替换，避免 patch 因上游行号漂移而失败。
+              python3 "$SUSFS_V23_DIR/fix_ksud_integration.py"
               echo "Patching susfs_init() call into kernelsu_init()"
               patch -p1 --forward < "$SUSFS_V23_DIR/fix_init_susfs_call.patch" || true
               # 成败不用 .rej 判断（fix_init.c 故意跳过「删 late-load」的 hunk，
