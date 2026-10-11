@@ -796,30 +796,50 @@ runs:
           )
           
           local download_url=""
+          local api_url=""
           if [[ "$url" == *"github.com"* ]]; then
               download_url="${url%.git}/archive/refs/heads/${branch}.tar.gz"
           elif [[ "$url" == *"gitlab.com"* ]]; then
               download_url="${url%.git}/-/archive/${branch}/${repo_name}-${branch}.tar.gz"
+              local project_path="${url#https://gitlab.com/}"
+              project_path="${project_path%.git}"
+              api_url="https://gitlab.com/api/v4/projects/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=""))' "$project_path")/repository/archive.tar.gz?sha=${branch}"
           else
               echo "::error::Unsupported host: $url"
               return 1
           fi
-          
+
           while [ $attempt -le $max_attempts ]; do
-              echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
-              
-              if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
-                  mkdir -p "$repo_name"
-                  if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
-                      echo "✅ Success: $repo_name synced"
-                      rm -f "$shm_path"
-                      return 0
-                  fi
+              echo " Attempt $attempt/$max_attempts: curl fetch for $repo_name ($branch)"
+              rm -f "$shm_path"
+
+              # Use curl's default User-Agent first. GitLab's WAF rejects aria2
+              # when it advertises a browser UA that does not match its TLS.
+              if curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 30 \
+                  -o "$shm_path" "$download_url"; then
+                  :
+              elif [ -n "$api_url" ] && curl --fail --location --retry 3 --retry-delay 2 \
+                  --connect-timeout 30 -o "$shm_path" "$api_url"; then
+                  echo "✅ GitLab API archive fallback succeeded"
+              elif aria2c -x8 -s8 --retry-wait=2 --max-tries=3 -d "/dev/shm" \
+                  -o "$archive_name" --allow-overwrite=true "$download_url"; then
+                  cp "/dev/shm/$archive_name" "$shm_path"
+              else
+                  echo "⚠️ Attempt $attempt failed, clearing RAM and retrying..."
+                  rm -f "$shm_path" "/dev/shm/$archive_name"
+                  sleep 5
+                  attempt=$((attempt + 1))
+                  continue
               fi
-              
-              echo "⚠️ Attempt $attempt failed, clearing RAM and retrying..."
+
+              mkdir -p "$repo_name"
+              if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" \
+                  -C "$repo_name" --strip-components=1 --no-same-owner; then
+                  echo "✅ Success: $repo_name synced"
+                  rm -f "$shm_path" "/dev/shm/$archive_name"
+                  return 0
+              fi
               rm -rf "$repo_name" "$shm_path" 2>/dev/null
-              sleep 5
               attempt=$((attempt + 1))
           done
           
