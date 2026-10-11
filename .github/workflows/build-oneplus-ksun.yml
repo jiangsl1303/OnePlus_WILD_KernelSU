@@ -42,6 +42,16 @@ on:
           - A16
         default: 'auto'
 
+      kmi_filter:
+        description: >-
+          KMI 精确过滤（auto = 不限）。可选值：android12-5.10 / android13-5.15 /
+          android14-6.1 / android15-6.6 / android16-6.12。
+          注意：susfs_mode=source 目前只覆盖 android14-6.1（pershoot/susfs4ksu 仅有
+          gki-android14-6.1-dev 分支），其余 KMI 请用 lkm 或 patched。
+        required: false
+        type: string
+        default: 'auto'
+
       susfs_mode:
         description: >-
           SUSFS 方案：source = pershoot/KernelSU-Next 的 dev-susfs 分支（KSUN 侧已内置
@@ -164,6 +174,7 @@ jobs:
         env:
           DEVICE_INPUT: ${{ inputs.device }}
           AV_INPUT: ${{ inputs.android_version }}
+          KMI_INPUT: ${{ inputs.kmi_filter }}
           KSU_REF: ${{ inputs.ksu_ref }}
           SUSFS_REF: ${{ inputs.susfs_ref }}
           SUSFS_MODE: ${{ inputs.susfs_mode }}
@@ -193,6 +204,22 @@ jobs:
           if [ "$total_av" -eq 0 ]; then
             echo "::error::在 Android 版本 '$AV_INPUT' 下没有任何设备配置。"
             exit 1
+          fi
+
+          # 2.5) KMI 精确过滤（按 android_version-kernel_version 组合，如 android14-6.1）
+          #      source 模式依赖 pershoot/susfs4ksu 的 gki-<kmi>-dev 分支，目前只有
+          #      android14-6.1；其余 KMI 走 lkm / patched。
+          if [ "$KMI_INPUT" != "auto" ] && [ -n "$KMI_INPUT" ]; then
+            jq -c --arg kmi "$KMI_INPUT" \
+              'map(select((.android_version + "-" + .kernel_version) == $kmi))' \
+              /tmp/stage1.json > /tmp/stage1.tmp
+            mv /tmp/stage1.tmp /tmp/stage1.json
+            total_kmi=$(jq 'length' /tmp/stage1.json)
+            if [ "$total_kmi" -eq 0 ]; then
+              echo "::error::KMI '$KMI_INPUT' 下没有任何设备配置（可选：android12-5.10 / android13-5.15 / android14-6.1 / android15-6.6 / android16-6.12）。"
+              exit 1
+            fi
+            echo "KMI 过滤 '$KMI_INPUT' → 剩余 $total_kmi 个设备配置。"
           fi
 
           # 3) 设备关键字过滤
@@ -1184,7 +1211,7 @@ jobs:
           {
             echo "# OnePlus KernelSU-Next 构建"
             echo ""
-            echo "**触发参数**：device=\`${{ inputs.device }}\` / android=\`${{ inputs.android_version }}\` / susfs_mode=\`${{ inputs.susfs_mode }}\` / ksu_ref=\`${{ inputs.ksu_ref }}\` / optimize=\`${{ inputs.optimize_level }}\`"
+            echo "**触发参数**：device=\`${{ inputs.device }}\` / android=\`${{ inputs.android_version }}\` / kmi=\`${{ inputs.kmi_filter }}\` / susfs_mode=\`${{ inputs.susfs_mode }}\` / ksu_ref=\`${{ inputs.ksu_ref }}\` / optimize=\`${{ inputs.optimize_level }}\`"
             echo ""
             if [ "$LCOUNT" -gt 0 ]; then
               echo "> **LKM 模式**：内核使用最新 KernelSU-Next（不打 SUSFS 源码补丁），SUSFS 由下面的模块 zip 提供。"
