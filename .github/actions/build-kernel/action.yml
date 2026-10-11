@@ -931,11 +931,16 @@ runs:
         # The SUSFS GKI patch calls KSUN's my_setprocattr() from services.c.
         # On Android 14/6.1, that path needs fake_state to have external linkage.
         if [ "$KSU_REPO" = "https://github.com/pershoot/KernelSU-Next.git" ]; then
-          if grep -q '^static struct selinux_state fake_state;' feature/selinux_hide.c; then
-            sed -i 's/^static struct selinux_state fake_state;$/struct selinux_state fake_state;/' feature/selinux_hide.c
-            echo "Adjusted fake_state linkage for SUSFS GKI integration"
+          FAKE_STATE_FILES=$(grep -RIl --include='*.c' --include='*.h' \
+            -E '^[[:space:]]*static[[:space:]]+struct[[:space:]]+selinux_state[[:space:]]+fake_state([[:space:]]|;)' . || true)
+          if [ -n "$FAKE_STATE_FILES" ]; then
+            while IFS= read -r file; do
+              sed -E -i 's/^([[:space:]]*)static([[:space:]]+struct[[:space:]]+selinux_state[[:space:]]+fake_state)/\1\2/' "$file"
+            done <<< "$FAKE_STATE_FILES"
+            echo "Adjusted fake_state linkage for SUSFS GKI integration: $FAKE_STATE_FILES"
           fi
-          grep -q '^struct selinux_state fake_state;' feature/selinux_hide.c
+          grep -Rqs --include='*.c' --include='*.h' \
+            -E '^[[:space:]]*struct[[:space:]]+selinux_state[[:space:]]+fake_state([[:space:]]|;)' .
         fi
         
         if [[ "$KSU_VERSION" -gt 33095 ]] && [[ "${{ env.KERNEL_VER }}" == "6.12" ]]; then
