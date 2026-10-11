@@ -930,17 +930,12 @@ runs:
 
         # The SUSFS GKI patch calls KSUN's my_setprocattr() from services.c.
         # On Android 14/6.1, that path needs fake_state to have external linkage.
+        # The official KSUN tree receives fake_state from the SUSFS KSUN patch.
+        # Keep this check only as a diagnostic; the source integration patch is
+        # applied in the SUSFS step below and owns the symbol definition.
         if [ "$KSU_REPO" = "https://github.com/pershoot/KernelSU-Next.git" ]; then
-          FAKE_STATE_FILES=$(grep -RIl --include='*.c' --include='*.h' \
-            -E '^[[:space:]]*static[[:space:]]+struct[[:space:]]+selinux_state[[:space:]]+fake_state([[:space:]]|;)' . || true)
-          if [ -n "$FAKE_STATE_FILES" ]; then
-            while IFS= read -r file; do
-              sed -E -i 's/^([[:space:]]*)static([[:space:]]+struct[[:space:]]+selinux_state[[:space:]]+fake_state)/\1\2/' "$file"
-            done <<< "$FAKE_STATE_FILES"
-            echo "Adjusted fake_state linkage for SUSFS GKI integration: $FAKE_STATE_FILES"
-          fi
-          grep -Rqs --include='*.c' --include='*.h' \
-            -E '^[[:space:]]*struct[[:space:]]+selinux_state[[:space:]]+fake_state([[:space:]]|;)' .
+          echo "::error::The pershoot SUSFS fork is incompatible with the GKI source patch; use official KernelSU-Next."
+          exit 1
         fi
         
         if [[ "$KSU_VERSION" -gt 33095 ]] && [[ "${{ env.KERNEL_VER }}" == "6.12" ]]; then
@@ -1048,8 +1043,8 @@ runs:
           echo "NEED_HOOKS=false" >> $GITHUB_ENV
         fi
         
-        if [ "$KSU_REPO" = "https://github.com/pershoot/KernelSU-Next.git" ]; then
-          echo "KernelSU-Next SUSFS-integrated repository detected; skipping legacy KSUN SUSFS enable patches."
+        if false; then
+          echo "SUSFS-integrated repository path disabled; use the official KSUN integration patches."
           echo "NEED_HOOKS=false" >> $GITHUB_ENV
         else
         case "$susfs_version" in
