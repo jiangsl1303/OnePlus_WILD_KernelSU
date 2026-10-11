@@ -60,10 +60,10 @@ on:
         default: 'source'
 
       fetch_manager:
-        description: '顺带抓取与内核版本号最接近的官方 KernelSU-Next 管理器 APK（普通版 + spoof 版）'
+        description: '顺带抓取与内核版本号最接近的官方 KernelSU-Next 管理器 APK（普通版 + spoof 版）。暂不建议开：版本挑选逻辑还没校准'
         required: false
         type: boolean
-        default: true
+        default: false
 
       ksu_ref:
         description: >-
@@ -471,13 +471,16 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "kmi_list=$kmi_list" >> "$GITHUB_OUTPUT"
           # KernelSU-Next 版本号 = 该 commit 的提交总数 + 30000（与 Kbuild 里的算法一致），
-          # 供 manager job 去官方 release 里挑版本号最接近的管理器 APK
-          ksuver=$(curl -sI --retry 2 \
+          # 供 manager job 去官方 release 里挑版本号最接近的管理器 APK。
+          # 注意：这里必须用 GET + -D 取响应头，不能用 -I（HEAD）—— GitHub API 对
+          # HEAD 请求不返回 Link 头，会导致版本号算成 30000 进而选错 release。
+          ksuver_pages=$(curl -s -D - -o /dev/null --retry 2 \
             "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=${ksu_resolved}&per_page=1" \
-            | tr -d '\r' | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"' | grep -o '[0-9]*' | head -1)
-          ksuver=$(( ${ksuver:-0} + 30000 ))
+            | tr -d '\r' | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"' \
+            | grep -o '[0-9][0-9]*' | head -1 || true)
+          ksuver=$(( ${ksuver_pages:-0} + 30000 ))
           echo "ksuver=$ksuver" >> "$GITHUB_OUTPUT"
-          echo "KernelSU-Next 版本号: $ksuver"
+          echo "KernelSU-Next 版本号: $ksuver（commit 数 ${ksuver_pages:-0}）"
           {
             echo "matrix<<MATRIX_EOF"
             echo "$matrix_json"
