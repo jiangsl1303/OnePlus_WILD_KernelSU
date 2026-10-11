@@ -1134,6 +1134,48 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
+          "v2.3.0")
+            # SUSFS v2.3.0：官方 10_enable_susfs_for_ksu.patch 已跟不上 KernelSU-Next 的
+            # 目录重构（core/feature/hook/policy/runtime/supercall），直接用会产生 7~16 个
+            # .rej 且没有对应 fix_*.patch。这里改用社区维护的集成补丁链
+            # （来源 Ante0/kernel_patches，作者向 WildKernels 提 PR）：
+            #   1) ksu_susfs_integration.patch  —— 108KB 的 KSU 侧 SUSFS 集成补丁
+            #      （上游注释原话 "SIMON IS ON VACATION"，即 simonpunk 休假期间社区自写）
+            #   2) fixes/*.patch                —— 10 个为新版内核重写的 fix 补丁
+            #      （比 WildKernels 版多 fix_dispatch.c / fix_ksu.h / fix_selinux.c）
+            #   3) fix_init_susfs_call.patch    —— 本项目补写：在 kernelsu_init() 里插入
+            #      susfs_init() 调用。上游补丁想删掉 ksu_late_loaded 分支把函数拍平，
+            #      但最新 KernelSU-Next 需要 late-load，这里只插入调用、保留原逻辑。
+            # 补丁文件随本仓库放在 .github/patches/susfs-v23/，随 checkout 一起可用。
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              cd "$KSUN_FOLDER"
+              SUSFS_V23_DIR="${{ github.workspace }}/.github/patches/susfs-v23"
+              if [ ! -f "$SUSFS_V23_DIR/ksu_susfs_integration.patch" ]; then
+                echo "::error::未找到 $SUSFS_V23_DIR/ksu_susfs_integration.patch"
+                echo "::error::susfs_mode=source 需要 fork 仓库里带 .github/patches/susfs-v23/ 目录"
+                exit 1
+              fi
+              echo "Patching KernelSU-Next with community SUSFS v2.3.0 integration"
+              patch -p1 --forward < "$SUSFS_V23_DIR/ksu_susfs_integration.patch" || true
+              for f in "$SUSFS_V23_DIR"/fixes/*.patch; do
+                [ -e "$f" ] || continue
+                echo "Patching with $(basename "$f")"
+                patch -p1 --forward < "$f" || true
+              done
+              echo "Patching susfs_init() call into kernelsu_init()"
+              patch -p1 --forward < "$SUSFS_V23_DIR/fix_init_susfs_call.patch" || true
+              n_rej=$(find ./kernel -name "*.rej" 2>/dev/null | wc -l)
+              echo "剩余 .rej 文件数: $n_rej"
+              if [ "$n_rej" != "0" ]; then
+                find ./kernel -name "*.rej" | sed 's/^/  未解决: /'
+                echo "::error::SUSFS v2.3.0 补丁链存在未解决的 .rej，KernelSU-Next 可能又改了代码，需要更新补丁链"
+                exit 1
+              fi
+            else
+              cd "$KSU_FOLDER"
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+            fi
+            ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
