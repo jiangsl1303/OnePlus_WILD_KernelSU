@@ -1,0 +1,13 @@
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -101,6 +101,10 @@
+ 		return -ENOSYS;
+ 	}
+ 
++#ifdef CONFIG_KSU_SUSFS
++	susfs_init();
++#endif
++
+ 	ksu_init_symbol_resolver();
+ 	ksu_syscall_hook_init();
+ 
