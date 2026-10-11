@@ -1,0 +1,44 @@
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -63,6 +63,7 @@
+ #endif
+ 
+ struct cred *ksu_cred;
++bool ksu_late_loaded;
+ 
+ #ifdef CONFIG_KSU_DEBUG
+ bool allow_shell = true;
+@@ -91,6 +92,12 @@
+ 	pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
+ 	pr_alert("*************************************************************");
+ #endif
++#ifdef MODULE
++	ksu_late_loaded = (current->pid != 1);
++#else
++	ksu_late_loaded = false;
++#endif
++
+ 	if (allow_shell) {
+ 		pr_alert("shell is allowed at init!");
+ 	}
+--- a/kernel/policy/app_profile.h
++++ b/kernel/policy/app_profile.h
+@@ -10,4 +10,6 @@
+ 
+ int escape_to_root_for_init(void);
+ 
++void __init ksu_app_profile_init(void);
++
+ #endif
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -212,3 +212,9 @@
+ 
+     return 0;
+ }
++
++void __init ksu_app_profile_init(void)
++{
++	/* NEED_BACKPORT_COMPAT 只对 6.6 ~ 6.11 生效，android14-6.1 这里本来就没有事做。 */
++	/* 该函数原先被 SUSFS 集成补丁删掉，这里补回来以保留 late-load 分支里的调用。 */
++}
