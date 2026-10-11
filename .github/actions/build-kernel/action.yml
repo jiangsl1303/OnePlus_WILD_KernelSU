@@ -1177,6 +1177,8 @@ runs:
               grep -qi "susfs"             kernel/hook/setuid_hook.c     || { echo "::error::setuid_hook.c 未接入 SUSFS";  ok=0; }
               grep -q "syscall_hook_manager.h" kernel/core/init.c || { echo "::error::init.c 缺少 syscall_hook_manager.h（late-load 分支需要）"; ok=0; }
               grep -q "infra/symbol_resolver.h" kernel/core/init.c || { echo "::error::init.c 缺少 symbol_resolver.h"; ok=0; }
+              grep -q "int ksu_handle_execveat_ksud(int \*fd" kernel/runtime/ksud_integration.c || { echo "::error::ksud_integration.c 缺少 5 参数包装"; ok=0; }
+              grep -q "hook/syscall_event_bridge.h" kernel/runtime/ksud_integration.c || { echo "::error::ksud_integration.c 缺少 syscall_event_bridge.h"; ok=0; }
               if [ "$ok" != "1" ]; then
                 echo "::error::SUSFS v2.3.0 补丁链内容校验未通过 —— KernelSU-Next 可能又改了代码，需要更新 .github/patches/susfs-v23/"
                 exit 1
