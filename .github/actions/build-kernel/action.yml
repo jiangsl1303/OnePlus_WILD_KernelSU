@@ -27,6 +27,11 @@ inputs:
     required: false
     type: string
     default: ""
+  susfs_repo:
+    description: 'SUSFS git repository URL. source mode uses the pershoot fork (gki-*-dev branch = simonpunk tip + Toolkit coexistence commits); other modes use simonpunk/susfs4ksu.'
+    required: false
+    type: string
+    default: "https://gitlab.com/simonpunk/susfs4ksu.git"
   build_timestamp:
     description: 'Custom kernel build timestamp shown in uname -a (e.g. "Tue Feb 10 10:01:02 UTC 2026"). Leave empty to use the current build time.'
     required: false
@@ -883,7 +888,7 @@ runs:
         
         if [ "${{ env.OP_SUSFS }}" = true ]; then
           echo "Using SUSFS branch/commit: $SUSFS_BRANCH"
-          if ! retry_fetch_archive "https://gitlab.com/simonpunk/susfs4ksu.git" "$SUSFS_BRANCH"; then
+          if ! retry_fetch_archive "${{ inputs.susfs_repo }}" "$SUSFS_BRANCH"; then
             echo "::error::Failed to fetch SUSFS archive after multiple attempts"
             exit 1
           fi
@@ -948,14 +953,17 @@ runs:
           sed -i 's/#if defined(CONFIG_STACKPROTECTOR) && (defined(CONFIG_ARM64) && !defined(CONFIG_STACKPROTECTOR_PER_TASK))/#if 0/' ksu.c
         fi
 
-        # The SUSFS GKI patch calls KSUN's my_setprocattr() from services.c.
-        # On Android 14/6.1, that path needs fake_state to have external linkage.
-        # The official KSUN tree receives fake_state from the SUSFS KSUN patch.
-        # Keep this check only as a diagnostic; the source integration patch is
-        # applied in the SUSFS step below and owns the symbol definition.
+        # SUSFS GKI patch（50_add_susfs_in_gki-*.patch）与 KSUN 侧的符号契约：
+        #   · selinux.c 的 setprocattr 钩子引用全局 fake_state 与 ksu_selinux_hide_running；
+        #   · 官方 KernelSU-Next 的 fake_state 是 static（或已不存在），链接期会报
+        #     undefined reference；
+        #   · pershoot/KernelSU-Next 的 dev-susfs 分支在 kernel/feature/selinux_hide.c
+        #     定义全局 fake_state，并内置全部 CONFIG_KSU_SUSFS 钩子 —— source 模式
+        #     （SUSFS v2.3.0）用的就是这个 fork，因此这里不再拦截 pershoot。
+        #   patched 模式（v2.2.0 + 官方 KSUN 33239）由 10_enable_susfs_for_ksu.patch
+        #     把 static fake_state 改成全局，两种模式各自自洽。
         if [ "$KSU_REPO" = "https://github.com/pershoot/KernelSU-Next.git" ]; then
-          echo "::error::The pershoot SUSFS fork is incompatible with the GKI source patch; use official KernelSU-Next."
-          exit 1
+          echo "ℹ️  Using pershoot/KernelSU-Next (SUSFS-integrated fork; KSUN-side SUSFS integration is built in)"
         fi
         
         if [[ "$KSU_VERSION" -gt 33095 ]] && [[ "${{ env.KERNEL_VER }}" == "6.12" ]]; then
@@ -1156,6 +1164,33 @@ runs:
               patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/overwrite_hook_mode.patch"
               echo "Patching KSU_TOOLKIT Support for SusFS kernel!"
               patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/ksu_toolkit.patch"
+            else
+              cd "$KSU_FOLDER"
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+            fi
+            ;;
+          "v2.3.0")
+            # WildKernels/GKI_KernelSU_SUSFS 的 next flavor 同款方案：
+            # KSUN 侧集成已内置在 pershoot/KernelSU-Next 的 dev-susfs 分支
+            # （feature/selinux_hide.c 定义全局 fake_state；init.c / sucompat.c /
+            #   kernel_umount.c / setuid_hook.c 等带 CONFIG_KSU_SUSFS 钩子）。
+            # 因此这里整条跳过 10_enable_susfs_for_ksu.patch 与
+            # next/susfs_fix_patches（上游 kernel_patches 只提供到 v2.2.0，
+            # 对 v2.3.0 打上去只会产生 reversed/冲突的 .rej）。
+            # SUSFS 源码侧走 pershoot/susfs4ksu 的 gki-<版本>-dev 分支
+            # （= simonpunk 分支头 + 2 条 "no features core / Toolkit 共存" 提交）。
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              if [ "${{ inputs.ksu_repo }}" != "https://github.com/pershoot/KernelSU-Next.git" ]; then
+                echo "::error::SUSFS v2.3.0 源码模式要求 ksu_repo=https://github.com/pershoot/KernelSU-Next.git（dev-susfs 分支内置 KSUN 侧集成），当前为 ${{ inputs.ksu_repo }}"
+                echo "::error::官方 KernelSU-Next 的 fake_state 为 static，v2.3.0 的 GKI 补丁会链接失败；请改用 susfs_mode=source 或 patched。"
+                exit 1
+              fi
+              echo "KSUN 侧集成由 pershoot dev-susfs 内置提供：跳过 10_enable_susfs_for_ksu.patch / next/susfs_fix_patches"
+              cd "$KSUN_FOLDER"
+              rej_count=$(find ./kernel -maxdepth 2 -name "*.rej" 2>/dev/null | wc -l)
+              if [ "$rej_count" -ne 0 ]; then
+                echo "::warning::KernelSU-Next 树里发现 $rej_count 个 .rej（不应存在，fork 已内置集成）"
+              fi
             else
               cd "$KSU_FOLDER"
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
