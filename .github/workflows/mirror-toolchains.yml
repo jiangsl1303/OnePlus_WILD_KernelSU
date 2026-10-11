@@ -55,6 +55,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          curl -fsSL --retry 3 -o upstream.tar.gz \
+            "https://codeload.github.com/WildKernels/OnePlus_KernelSU_SUSFS/tar.gz/refs/heads/main"
+          tar xzf upstream.tar.gz
+          rm -rf configs manifests
+          cp -r OnePlus_KernelSU_SUSFS-main/configs ./configs
+          cp -r OnePlus_KernelSU_SUSFS-main/manifests ./manifests
+          rm -rf OnePlus_KernelSU_SUSFS-main upstream.tar.gz
           
           echo "[" > all_configs.json
           mapfile -t files < <(find configs/ -name "*.json")
