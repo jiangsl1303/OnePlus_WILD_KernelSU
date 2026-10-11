@@ -106,6 +106,12 @@ on:
         type: boolean
         default: false
 
+      only_lkm:
+        description: '只打包 SUSFS LKM 模块，跳过全部内核构建（用来单独更新模块，约 2 分钟）'
+        required: false
+        type: boolean
+        default: false
+
       debug:
         description: '输出详细调试日志'
         required: false
@@ -474,7 +480,7 @@ jobs:
   build:
     name: build (${{ matrix.model }} / ${{ matrix.os_version }} / KSUN)
     needs: resolve
-    if: ${{ needs.resolve.result == 'success' && !inputs.list_only }}
+    if: ${{ needs.resolve.result == 'success' && !inputs.list_only && !inputs.only_lkm }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -588,7 +594,7 @@ jobs:
   lkm:
     name: Package SUSFS LKM
     needs: resolve
-    if: ${{ needs.resolve.result == 'success' && inputs.susfs_mode == 'lkm' }}
+    if: ${{ needs.resolve.result == 'success' && (inputs.susfs_mode == 'lkm' || inputs.only_lkm) }}
     runs-on: ubuntu-latest
     outputs:
       lkm_zip: ${{ steps.assemble.outputs.lkm_zip }}
@@ -882,7 +888,9 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload LKM module
-        uses: actions/upload-artifact@v4
+        # 必须用 v7：v4 不支持 archive 输入（会被静默忽略），会把模块 zip 再套一层 zip，
+        # 用户从 Artifacts 下载到的是「zip 里装 zip」。
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.assemble.outputs.lkm_zip }}
           path: ${{ steps.assemble.outputs.lkm_zip }}
@@ -914,25 +922,44 @@ jobs:
     name: Create release
     needs: [resolve, build, lkm]
     if: >-
-      ${{ !cancelled() && inputs.make_release && needs.build.result == 'success'
+      ${{ !cancelled() && inputs.make_release
+          && (needs.build.result == 'success' || needs.build.result == 'skipped')
           && (needs.lkm.result == 'success' || needs.lkm.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./all
-          merge-multiple: true
+      # 不用 actions/download-artifact：它对 archive:false 上传的 artifact 行为不确定
+      # （可能把 AK3 / 模块 zip 当成压缩包解开）。这里直接用 artifact API，
+      # 该接口对 archive:false 的 artifact 返回的就是原始文件本身。
+      - name: Download all artifacts (raw, via API)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./ak3 ./lkm
+          api="https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts"
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$api" -o /tmp/arts.json
+          n=0
+          while IFS=$'\t' read -r id name; do
+            [ -z "${name:-}" ] && continue
+            case "$name" in
+              AK3_*)       dest="./ak3/$name" ;;
+              SUSFS-LKM-*) dest="./lkm/$name" ;;
+              *)           echo "  跳过 $name"; continue ;;
+            esac
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/artifacts/${id}/zip" -o "$dest"
+            echo "  ↓ $dest  ($(stat -c%s "$dest") bytes)"
+            n=$((n + 1))
+          done < <(jq -r '.artifacts[] | "\(.id)\t\(.name)"' /tmp/arts.json)
+          echo "共下载 $n 个产物"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p ./ak3 ./lkm
-          find ./all -maxdepth 1 -name 'AK3_*.zip' -exec cp {} ./ak3/ \; 2>/dev/null || true
-          find ./all -maxdepth 1 -name 'SUSFS-LKM-*.zip' -exec cp {} ./lkm/ \; 2>/dev/null || true
-
           TAG="op-ksun-$(date -u +%Y%m%d-%H%M%S)"
           COUNT=$(find ./ak3 -maxdepth 1 -name '*.zip' | wc -l)
           LCOUNT=$(find ./lkm -maxdepth 1 -name '*.zip' | wc -l)
