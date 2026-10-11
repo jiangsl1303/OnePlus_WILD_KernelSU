@@ -44,11 +44,9 @@ on:
 
       susfs_mode:
         description: >-
-          SUSFS 方案（内核都用最新 KernelSU-Next，除非 patched 模式）：
-          source = SUSFS v2.3.0 源码补丁直接编进内核（社区维护的补丁链，产物只有 AK3 包）；
-          lkm = 内核不打 SUSFS 补丁 + 额外产出一个 SUSFS v2.3.0 可加载模块
-          （KernelSU 模块 zip，由 ksud 加载）；
-          patched = 传统源码补丁方案（SUSFS v2.2.0 + KSUN 33239 成对钉定，已验证可用）；
+          SUSFS 方案：source = 最新 KernelSU-Next SUSFS 集成分支 + 最新 SUSFS 源码补丁，
+          直接编进内核；lkm = 最新官方 KernelSU-Next + 可加载 SUSFS 模块；
+          patched = 传统源码补丁方案（SUSFS v2.2.0 + KSUN 33239 成对钉定）；
           none = 只带 KernelSU-Next，完全不带 SUSFS。
         required: true
         type: choice
@@ -67,21 +65,17 @@ on:
 
       ksu_ref:
         description: >-
-          KernelSU-Next 分支或 commit。auto(默认) = 按 susfs_mode 自动选择：
-          lkm/none → dev（最新）；patched → 234f6e04（= KSUN 33239，
-          与上游 kernel_patches 的 SUSFS v2.2.0 修复补丁严格配对）。
-          也可直接填分支名或 commit。
+          KernelSU-Next 分支或 commit。auto(默认) = source 使用 pershoot/KernelSU-Next
+          的 dev-susfs 最新提交（内核已集成 SUSFS），lkm/none 使用官方 dev 最新提交，
+          patched 使用 234f6e04（= KSUN 33239）。也可直接填分支名或 commit。
         required: true
         type: string
         default: 'auto'
 
       susfs_ref:
         description: >-
-          仅 susfs_mode=patched 时生效。SUSFS 源码引用。auto(默认) = 钉到各内核
-          分支 2026-08-11 的提交（与 kernel_patches 的 v2.2.0 修复补丁、KSUN 33239
-          严格配对；取分支头会因 v2.3.0 报 Unsupported SUSFS version，取更晚的
-          v2.2.0 提交会因 .rej 文件没有对应 fix_*.patch 而失败）；latest = 跟随
-          分支头；也可直接填 40 位 commit 或分支名。
+          SUSFS 源码引用。source 默认跟随对应 gki-* 分支头，获取最新源码补丁；
+          patched 默认使用已验证的 v2.2.0 配对提交；latest、分支名或 commit 可覆盖。
         required: true
         type: string
         default: 'auto'
@@ -272,36 +266,44 @@ jobs:
 
           echo "共匹配到 $count 个设备配置。"
 
-          # 4) 解析 KernelSU-Next 的 commit（保证可复现）
-          #
-          #    ksu_ref=auto 时按 susfs_mode 决定：
-          #      lkm / none → dev（最新 KernelSU-Next，不打 SUSFS 源码补丁）
-          #      patched    → 234f6e04（KSUN 33239，与 SUSFS v2.2.0 修复补丁配对）
+          # 4) 解析 KernelSU-Next 的 commit 与仓库。
+          # source 使用 pershoot 的 dev-susfs：该分支把 SUSFS 集成在 KSUN 内核树中，
+          # 可与最新 SUSFS GKI 源码补丁同步；其管理器仍从官方仓库单独获取。
           KSU_PIN_33239="234f6e040fcbca18b16d2398e1aa225712ec99ad"
-          if [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
+          KSU_OFFICIAL_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
+          KSU_SOURCE_REPO="https://github.com/pershoot/KernelSU-Next.git"
+          if [ "$SUSFS_MODE" = "source" ] && { [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; }; then
+            KSU_REF="dev-susfs"
+            KSU_REPO="$KSU_SOURCE_REPO"
+          elif [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
             case "$SUSFS_MODE" in
               patched) KSU_REF="$KSU_PIN_33239" ;;
               *)       KSU_REF="dev" ;;
             esac
-            echo "ksu_ref=auto → 按 susfs_mode=$SUSFS_MODE 选用 $KSU_REF"
+            KSU_REPO="$KSU_OFFICIAL_REPO"
+          else
+            KSU_REPO="$KSU_OFFICIAL_REPO"
           fi
 
+          echo "ksu_ref=$KSU_REF, ksu_repo=$KSU_REPO"
           echo "解析 KernelSU-Next ref: $KSU_REF ..."
           ksu_resolved=""
+          ksu_api_repo="KernelSU-Next/KernelSU-Next"
+          [ "$KSU_REPO" = "$KSU_SOURCE_REPO" ] && ksu_api_repo="pershoot/KernelSU-Next"
           for i in 1 2 3; do
             ksu_resolved=$(curl -fsSL --retry 2 \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits/${KSU_REF}" \
+              "https://api.github.com/repos/${ksu_api_repo}/commits/${KSU_REF}" \
               2>/dev/null | jq -r '.sha // empty' || true)
             [ -n "$ksu_resolved" ] && break
             echo "  第 $i 次解析失败，重试..."
             sleep 5
           done
           if [ -z "$ksu_resolved" ]; then
-            echo "::warning::无法解析 KernelSU-Next 的 '$KSU_REF'，将把分支名直接传给构建器。"
-            ksu_resolved="$KSU_REF"
+            echo "::error::无法解析 KernelSU-Next 的 '$KSU_REF' from $KSU_REPO"
+            exit 1
           fi
-          echo "KernelSU-Next → $ksu_resolved"
+          echo "KernelSU-Next → $ksu_resolved ($KSU_REPO)"
 
           # 4.1) 提示：源码补丁模式下 KernelSU-Next 版本必须与 SUSFS 修复补丁集匹配
           #      上游 kernel_patches 的 v2.2.0 修复补丁是按 KSUN 33239 生成的
@@ -444,13 +446,14 @@ jobs:
           #    lkm / none：强制 susfs=false，action 的 “Apply SUSFS Patches” 步骤会被整体跳过
           #    patched / source：保留 susfs=true，走 action 的源码补丁流程
           if [ "$SUSFS_MODE" = "lkm" ] || [ "$SUSFS_MODE" = "none" ]; then
-            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
+            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" --arg repo "$KSU_REPO" \
               'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh,
-                        susfs: false, susfs_resolved_hash: ""})' \
+                        ksu_repo: $repo, susfs: false, susfs_resolved_hash: ""})' \
               /tmp/stage2.json > /tmp/final.json
           else
-            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
-              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh})' \
+            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" --arg repo "$KSU_REPO" \
+              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh,
+                        ksu_repo: $repo})' \
               /tmp/stage2.json > /tmp/final.json
           fi
 
@@ -497,11 +500,9 @@ jobs:
             echo ""
             case "$SUSFS_MODE" in
               source)
-                echo "> **源码补丁模式（SUSFS v2.3.0 编进内核）**：内核使用最新 KernelSU-Next（\`$ksu_resolved\`，版本号 $ksuver），"
-                echo "> SUSFS v2.3.0 源码补丁直接编进内核。补丁链来自社区维护者 Ante0"
-                echo ">（\`ksu_susfs_integration.patch\` 108KB 集成补丁 + 10 个重写的 fix 补丁），"
-                echo "> 并已为本仓库补写 \`susfs_init()\` 调用补丁以适配 late-load。"
-                echo "> 实测：fresh KernelSU-Next 33337 上 **0 个 \`.rej\`**。"
+                echo "> **源码集成模式**：内核使用 pershoot/KernelSU-Next 的最新 dev-susfs 提交（\`$ksu_resolved\`，版本号 $ksuver），"
+                echo "> SUSFS 集成在 KSUN 内核树中，并同步使用对应 gki-* 分支的最新 SUSFS 源码补丁（\`${KSU_REPO}\`）。"
+                echo "> 该路径不再应用针对旧 KSUN 目录结构的本地 108KB 补丁链。"
                 ;;
               patched)
                 echo "> **源码补丁模式（钉定组合）**：SUSFS 与 KernelSU-Next 是**成对钉定**的 —— SUSFS 取各分支 2026-08-11 的提交，"
@@ -598,7 +599,7 @@ jobs:
         shell: bash
         run: |
           echo "config_json=$(jq -nc --argjson m '${{ toJSON(matrix) }}' \
-            '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash, .susfs_resolved_hash)')" >> "$GITHUB_OUTPUT"
+            '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash, .ksu_repo, .susfs_resolved_hash)')" >> "$GITHUB_OUTPUT"
 
       - name: Build Kernel
         id: build
@@ -607,6 +608,7 @@ jobs:
           op_config_json: ${{ steps.prepare_config.outputs.config_json }}
           ksu_type: KSUN
           ksu_branch_or_hash: ${{ matrix.ksu_resolved_hash }}
+          ksu_repo: ${{ matrix.ksu_repo }}
           susfs_commit_hash_or_branch: ${{ matrix.susfs_resolved_hash }}
           optimize_level: ${{ inputs.optimize_level }}
           clean: ${{ inputs.clean_build }}
