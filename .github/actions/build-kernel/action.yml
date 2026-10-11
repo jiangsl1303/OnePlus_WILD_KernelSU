@@ -17,6 +17,11 @@ inputs:
     required: false
     type: string
     default: ""
+  ksu_repo:
+    description: 'KernelSU repository URL (official by default; source mode may use a SUSFS-integrated fork)'
+    required: false
+    type: string
+    default: "https://github.com/KernelSU-Next/KernelSU-Next.git"
   susfs_commit_hash_or_branch:
     description: 'SUSFS branch or commit hash (empty = auto-detect by kernel version)'
     required: false
@@ -800,36 +805,10 @@ runs:
               return 1
           fi
           
-          # 备用下载路径：GitLab API 归档端点。
-          # 实测 gitlab.com 的 WAF 对「声称是 Chrome 但 TLS 指纹是 curl/aria2c」的请求直接 403，
-          # 对 curl 默认 UA 放行；api/v4 归档端点则两种 UA 都放行，故作为第二路径。
-          local api_url=""
-          if [[ "$url" == *"gitlab.com"* ]]; then
-              local proj
-              proj=$(printf '%s' "$url" | sed -E 's#^https?://gitlab\.com/##; s#\.git$##' | sed 's#/#%2F#g')
-              api_url="https://gitlab.com/api/v4/projects/${proj}/repository/archive.tar.gz?sha=${branch}"
-          fi
-          
           while [ $attempt -le $max_attempts ]; do
-              echo " Attempt $attempt/$max_attempts: Fetch for $repo_name ($branch)"
+              echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
               
-              # 关键：不要覆盖 User-Agent！
-              # 实测同一 URL：curl 默认 UA → 200；-A "Mozilla/5.0 ... Chrome/120" → 403；
-              # aria2c（多连接 Range + 伪造 UA）→ 403。Cloudflare 会用「UA 声明 vs TLS 指纹」
-              # 不一致来判定机器人，所以这里保持 curl 默认 UA。
-              local fetched=0
-              if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$shm_path" "$download_url"; then
-                  fetched=1
-                  echo "   ↳ curl ok ($(stat -c%s "$shm_path" 2>/dev/null || echo '?') bytes)"
-              elif [ -n "$api_url" ] && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$shm_path" "$api_url"; then
-                  fetched=1
-                  echo "   ↳ curl(api/v4) ok ($(stat -c%s "$shm_path" 2>/dev/null || echo '?') bytes)"
-              elif aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true $aria_log_flags "$download_url"; then
-                  fetched=1
-                  echo "   ↳ aria2c ok"
-              fi
-              
-              if [ "$fetched" = "1" ]; then
+              if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
                   mkdir -p "$repo_name"
                   if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
                       echo "✅ Success: $repo_name synced"
@@ -912,10 +891,24 @@ runs:
         cd "$KERNEL_PLATFORM_FOLDER"
         echo "Adding KernelSU Next..."
         KSU_INPUT="${{ inputs.ksu_branch_or_hash }}"
-        if [ -z "$KSU_INPUT" ]; then
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        KSU_REPO="${{ inputs.ksu_repo }}"
+        case "$KSU_REPO" in
+          https://github.com/*/*.git) ;;
+          *) echo "::error::Unsupported KernelSU repository URL: $KSU_REPO"; exit 1 ;;
+        esac
+        if [ "$KSU_REPO" = "https://github.com/KernelSU-Next/KernelSU-Next.git" ]; then
+          KSU_SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
         else
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_INPUT"
+          KSU_OWNER_REPO="${KSU_REPO#https://github.com/}"
+          KSU_OWNER_REPO="${KSU_OWNER_REPO%.git}"
+          KSU_SETUP_URL="https://raw.githubusercontent.com/${KSU_OWNER_REPO}/${KSU_INPUT:-dev-susfs}/kernel/setup.sh"
+        fi
+        echo "KernelSU repository: $KSU_REPO"
+        echo "KernelSU setup ref: ${KSU_INPUT:-default}"
+        if [ -z "$KSU_INPUT" ]; then
+          curl --fail --location --proto '=https' -LSs "$KSU_SETUP_URL" | bash -
+        else
+          curl --fail --location --proto '=https' -LSs "$KSU_SETUP_URL" | bash -s "$KSU_INPUT"
         fi
         git submodule update --init --recursive
         cd KernelSU-Next/kernel
@@ -950,7 +943,7 @@ runs:
         cd ..
         KSU_COMMIT_SHA=$(git rev-parse HEAD)
         echo "KSU_COMMIT_SHA=$KSU_COMMIT_SHA" >> $GITHUB_ENV
-        
+        echo "KSU_REPO=$KSU_REPO" >> $GITHUB_ENV
         
         echo "Add KSUN Configuration Settings"
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
@@ -1040,6 +1033,10 @@ runs:
           echo "NEED_HOOKS=false" >> $GITHUB_ENV
         fi
         
+        if [ "$KSU_REPO" = "https://github.com/pershoot/KernelSU-Next.git" ]; then
+          echo "KernelSU-Next SUSFS-integrated repository detected; skipping legacy KSUN SUSFS enable patches."
+          echo "NEED_HOOKS=false" >> $GITHUB_ENV
+        else
         case "$susfs_version" in
           "v1.5.8")
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
@@ -1134,72 +1131,12 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
-          "v2.3.0")
-            # SUSFS v2.3.0：官方 10_enable_susfs_for_ksu.patch 已跟不上 KernelSU-Next 的
-            # 目录重构（core/feature/hook/policy/runtime/supercall），直接用会产生 7~16 个
-            # .rej 且没有对应 fix_*.patch。这里改用社区维护的集成补丁链
-            # （来源 Ante0/kernel_patches，作者向 WildKernels 提 PR）：
-            #   1) ksu_susfs_integration.patch  —— 108KB 的 KSU 侧 SUSFS 集成补丁
-            #      （上游注释原话 "SIMON IS ON VACATION"，即 simonpunk 休假期间社区自写）
-            #   2) fixes/*.patch                —— 10 个为新版内核重写的 fix 补丁
-            #      （比 WildKernels 版多 fix_dispatch.c / fix_ksu.h / fix_selinux.c）
-            #   3) fix_init_susfs_call.patch    —— 本项目补写：在 kernelsu_init() 里插入
-            #      susfs_init() 调用。上游补丁想删掉 ksu_late_loaded 分支把函数拍平，
-            #      但最新 KernelSU-Next 需要 late-load，这里只插入调用、保留原逻辑。
-            # 补丁文件随本仓库放在 .github/patches/susfs-v23/，随 checkout 一起可用。
-            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-              cd "$KSUN_FOLDER"
-              SUSFS_V23_DIR="${{ github.workspace }}/.github/patches/susfs-v23"
-              if [ ! -f "$SUSFS_V23_DIR/ksu_susfs_integration.patch" ]; then
-                echo "::error::未找到 $SUSFS_V23_DIR/ksu_susfs_integration.patch"
-                echo "::error::susfs_mode=source 需要 fork 仓库里带 .github/patches/susfs-v23/ 目录"
-                exit 1
-              fi
-              echo "Patching KernelSU-Next with community SUSFS v2.3.0 integration"
-              patch -p1 --forward < "$SUSFS_V23_DIR/ksu_susfs_integration.patch" || true
-              # 主补丁失败时留下的 .rej 在 fix 补丁成功后不会被自动删除，
-              # 如果不清掉会污染后面的成败判断，所以这里先清一次
-              find . -name "*.rej" -delete
-              for f in "$SUSFS_V23_DIR"/fixes/*.patch; do
-                [ -e "$f" ] || continue
-                echo "Patching with $(basename "$f")"
-                patch -p1 --forward < "$f" || true
-              done
-              # SUSFS 主补丁从 Kbuild 删掉了 hook/syscall_event_bridge.c（整体不兼容新版 KSUN），
-              # 但 selinux_hide.c 仍引用其中的 ksu_stop_ksud_execve_hook。
-              # 另外 sucompat.c 现在以 5 参数调用 ksu_handle_execveat_ksud，而
-              # ksud_integration.c 里还是旧的 2 参数实现。
-              # 用独立 Python 脚本做文本替换，避免 patch 因上游行号漂移而失败。
-              python3 "$SUSFS_V23_DIR/fix_ksud_integration.py"
-              echo "Patching susfs_init() call into kernelsu_init()"
-              patch -p1 --forward < "$SUSFS_V23_DIR/fix_init_susfs_call.patch" || true
-              # 成败不用 .rej 判断（fix_init.c 故意跳过「删 late-load」的 hunk，
-              # 那部分本来就不该应用），改用内容标记验证 SUSFS 是否真的接进去了
-              find . -name "*.rej" -delete
-              ok=1
-              grep -q "susfs_init();"      kernel/core/init.c  || { echo "::error::init.c 缺少 susfs_init() 调用";  ok=0; }
-              grep -q "linux/susfs.h"      kernel/core/init.c  || { echo "::error::init.c 缺少 susfs.h 头文件";    ok=0; }
-              grep -qi "susfs"             kernel/feature/sucompat.c     || { echo "::error::sucompat.c 未接入 SUSFS";     ok=0; }
-              grep -qi "susfs"             kernel/hook/setuid_hook.c     || { echo "::error::setuid_hook.c 未接入 SUSFS";  ok=0; }
-              grep -q "syscall_hook_manager.h" kernel/core/init.c || { echo "::error::init.c 缺少 syscall_hook_manager.h（late-load 分支需要）"; ok=0; }
-              grep -q "infra/symbol_resolver.h" kernel/core/init.c || { echo "::error::init.c 缺少 symbol_resolver.h"; ok=0; }
-              grep -q "int ksu_handle_execveat_ksud(int \*fd" kernel/runtime/ksud_integration.c || { echo "::error::ksud_integration.c 缺少 5 参数包装"; ok=0; }
-              grep -q "hook/syscall_event_bridge.h" kernel/runtime/ksud_integration.c || { echo "::error::ksud_integration.c 缺少 syscall_event_bridge.h"; ok=0; }
-              if [ "$ok" != "1" ]; then
-                echo "::error::SUSFS v2.3.0 补丁链内容校验未通过 —— KernelSU-Next 可能又改了代码，需要更新 .github/patches/susfs-v23/"
-                exit 1
-              fi
-              echo "✅ SUSFS v2.3.0 补丁链内容校验通过（susfs 已接入 KernelSU-Next）"
-            else
-              cd "$KSU_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-            fi
-            ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
             ;;
         esac
+        fi
         
         cd "$COMMON_KERNEL_FOLDER"
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
