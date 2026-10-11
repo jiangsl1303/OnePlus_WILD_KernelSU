@@ -44,8 +44,9 @@ on:
 
       susfs_mode:
         description: >-
-          SUSFS 方案：source = 最新 KernelSU-Next SUSFS 集成分支 + 最新 SUSFS 源码补丁，
-          直接编进内核；lkm = 最新官方 KernelSU-Next + 可加载 SUSFS 模块；
+          SUSFS 方案：source = pershoot/KernelSU-Next 的 dev-susfs 分支（KSUN 侧已内置
+          SUSFS v2.3.0 集成）+ susfs4ksu v2.3.0 源码补丁，直接编进内核（WildKernels GKI
+          仓库同款方案）；lkm = 最新官方 KernelSU-Next + 可加载 SUSFS 模块；
           patched = 传统源码补丁方案（SUSFS v2.2.0 + KSUN 33239 成对钉定）；
           none = 只带 KernelSU-Next，完全不带 SUSFS。
         required: true
@@ -55,7 +56,7 @@ on:
           - lkm
           - patched
           - none
-        default: 'source'
+        default: 'lkm'
 
       fetch_manager:
         description: '顺带抓取与内核版本号最接近的官方 KernelSU-Next 管理器 APK（普通版 + spoof 版）。暂不建议开：版本挑选逻辑还没校准'
@@ -65,17 +66,20 @@ on:
 
       ksu_ref:
         description: >-
-          KernelSU-Next 分支或 commit。auto(默认) = source 使用 pershoot/KernelSU-Next
-          的 dev-susfs 最新提交（内核已集成 SUSFS），lkm/none 使用官方 dev 最新提交，
-          patched 使用 234f6e04（= KSUN 33239）。也可直接填分支名或 commit。
+          KernelSU-Next 分支或 commit。auto(默认) = lkm/none 使用官方 dev 最新提交，
+          source 使用 pershoot/KernelSU-Next 的 dev-susfs 分支（已内置 SUSFS v2.3.0
+          KSUN 侧集成），patched 使用 234f6e04（= KSUN 33239）。
+          也可直接填分支名或 commit。
         required: true
         type: string
         default: 'auto'
 
       susfs_ref:
         description: >-
-          SUSFS 源码引用。source 默认跟随对应 gki-* 分支头，获取最新源码补丁；
-          patched 默认使用已验证的 v2.2.0 配对提交；latest、分支名或 commit 可覆盖。
+          SUSFS 源码引用。source 默认取 pershoot/susfs4ksu 的 gki-<内核版本>-dev 分支头
+          （= simonpunk 分支头 + 2 条 Toolkit 共存提交，实测仍为 v2.3.0），也可显式填
+          pershoot 仓库上的 commit；patched 默认使用已验证的 v2.2.0 配对提交；
+          latest、分支名或 commit 可覆盖。
         required: true
         type: string
         default: 'auto'
@@ -267,17 +271,31 @@ jobs:
           echo "共匹配到 $count 个设备配置。"
 
           # 4) 解析 KernelSU-Next 的 commit 与仓库。
-          # source 模式使用官方 KSUN；SUSFS 的 KSUN 集成由 action 统一应用，
-          # 这样 GKI 补丁引用的 fake_state、fake_status 等符号会有真实定义。
+          #
+          #    source 模式采用 WildKernels/GKI_KernelSU_SUSFS 的 next flavor 同款方案：
+          #      · KSUN 侧：pershoot/KernelSU-Next 的 dev-susfs 分支 —— 该 fork 已内置
+          #        SUSFS v2.3.0 的 KSUN 侧集成（kernel/feature/selinux_hide.c 定义全局
+          #        struct selinux_state fake_state；init/sucompat/kernel_umount/
+          #        setuid_hook 等 8 个源文件带 CONFIG_KSU_SUSFS 钩子）。因此内核侧不再
+          #        需要 10_enable_susfs_for_ksu.patch，也不需要上游 kernel_patches 的
+          #        next/susfs_fix_patches（只提供到 v2.2.0）。
+          #      · 这是「官方 KSUN + 自写集成补丁」路线失败后的替代：自写补丁在 KSUN dev
+          #        上有 7+ 个 .rej，而 pershoot fork 由 SUSFS 维护线同步更新，无需补丁。
+          #    lkm / none：官方仓库 dev 最新提交。patched：钉定 234f6e04（KSUN 33239）。
           KSU_PIN_33239="234f6e040fcbca18b16d2398e1aa225712ec99ad"
           KSU_OFFICIAL_REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
           KSU_SOURCE_REPO="https://github.com/pershoot/KernelSU-Next.git"
           if [ "$KSU_REF" = "auto" ] || [ -z "$KSU_REF" ]; then
             case "$SUSFS_MODE" in
-              patched|source) KSU_REF="$KSU_PIN_33239" ;;
-              *)              KSU_REF="dev" ;;
+              patched) KSU_REF="$KSU_PIN_33239" ;;
+              source)  KSU_REF="dev-susfs" ;;
+              *)       KSU_REF="dev" ;;
             esac
-            KSU_REPO="$KSU_OFFICIAL_REPO"
+          fi
+          # source 模式固定使用 pershoot fork 的 dev-susfs 维护线；
+          # 显式传入 ksu_ref 时也在该 fork 上解析（报错即说明 ref 不存在）。
+          if [ "$SUSFS_MODE" = "source" ]; then
+            KSU_REPO="$KSU_SOURCE_REPO"
           else
             KSU_REPO="$KSU_OFFICIAL_REPO"
           fi
@@ -362,10 +380,11 @@ jobs:
           }
 
           # 读取某个 ref 的 susfs.h 中声明的版本号（纯 bash 解析，避免管道 SIGPIPE 噪音）
+          # $1 = gitlab 项目路径（owner/repo），$2 = ref（分支名 / commit / 短 SHA）
           susfs_version_of() {
             local body
             body=$(curl -fsSL --retry 2 --retry-delay 3 --max-time 40 \
-              "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$1/kernel_patches/include/linux/susfs.h" \
+              "https://gitlab.com/$1/-/raw/$2/kernel_patches/include/linux/susfs.h" \
               2>/dev/null || true)
             body=${body//$'\r'/}
             if [[ $body =~ \#define\ SUSFS_VERSION\ \"([^\"]*)\" ]]; then
@@ -374,6 +393,7 @@ jobs:
           }
 
           declare -A susfs_map
+          declare -A susfs_repo_map
           case "$SUSFS_MODE" in
             patched|source)
               mapfile -t active_keys < <(
@@ -390,33 +410,40 @@ jobs:
             branch="gki-${key}"
             sha=""
             if [ "$SUSFS_MODE" = "source" ]; then
-              # source 模式：直接将 SUSFS 源码补丁编进内核；当前可验证的
-              # KSUN 配对基线是 v2.2.0 + KSUN 33239。
+              # source 模式走 WildKernels next flavor 同款组合：
+              #   pershoot/KernelSU-Next dev-susfs（KSUN 侧集成，见上面 4) 的说明）
+              #   + pershoot/susfs4ksu 的 gki-<key>-dev 分支
+              # 后者 = simonpunk/susfs4ksu 的 gki-<key> 分支头 + 2 条提交
+              # （"Allow core to be built with no features" / "Implement SuSFS and
+              #   Toolkit coexistence"，均只改 kernel_patches/fs/susfs.c）。
+              # 实测 2026-10-12：simonpunk 分支头 17dc6b68 与钉定 v2.3.0（24743360）的
+              # include/linux 目录完全一致；pershoot dev 头 fb0f1f7d 在其之上。
+              SUSFS_SOURCE_PROJECT="pershoot/susfs4ksu"
               case "${SUSFS_REF:-auto}" in
-                ''|auto|pinned)
-                  sha="${SUSFS_V220[$key]:-$branch}"
-                  ver=$(susfs_version_of "$sha")
-                  echo "SUSFS [$key] → 配对提交 $sha${ver:+, 版本 $ver}（源码补丁模式）"
-                  ;;
-                latest|branch|head)
-                  echo "::warning::source 模式当前不能直接使用 SUSFS 分支头；回退到 KSUN 配对提交。"
-                  sha="${SUSFS_V220[$key]:-$branch}"
-                  ver=$(susfs_version_of "$sha")
+                ''|auto|latest|dev|branch|head)
+                  sha=$(git ls-remote "https://gitlab.com/${SUSFS_SOURCE_PROJECT}.git" \
+                        "refs/heads/${branch}-dev" 2>/dev/null | cut -f1 | cut -c1-12 || true)
                   ;;
                 *)
                   sha="$SUSFS_REF"
-                  ver=$(susfs_version_of "$sha")
-                  echo "SUSFS [$key] → 用户指定 $sha${ver:+, 版本 $ver}（源码补丁模式）"
                   ;;
               esac
+              if [ -z "$sha" ]; then
+                echo "::error::无法解析 pershoot/susfs4ksu 的 ${branch}-dev 分支头；请检查网络或显式指定 susfs_ref。"
+                exit 1
+              fi
+              ver=$(susfs_version_of "$SUSFS_SOURCE_PROJECT" "$sha")
+              [ "$ver" = "v2.3.0" ] || { echo "::error::source 模式要求 SUSFS v2.3.0，实际为 ${ver:-unknown} (pershoot/susfs4ksu $sha)"; exit 1; }
               susfs_map["$key"]="$sha"
+              susfs_repo_map["$key"]="https://gitlab.com/${SUSFS_SOURCE_PROJECT}.git"
+              echo "SUSFS [$key] → pershoot/susfs4ksu@${sha}（${branch}-dev 分支头，实测 $ver）"
               continue
             fi
             case "${SUSFS_REF:-auto}" in
               ''|auto|pinned)
                 sha="${SUSFS_V220[$key]:-}"
                 if [ -n "$sha" ]; then
-                  ver=$(susfs_version_of "$sha")
+                  ver=$(susfs_version_of "simonpunk/susfs4ksu" "$sha")
                   if [ -n "$ver" ] && ! susfs_supported "$ver"; then
                     echo "::warning::SUSFS [$key] 钉定提交 $sha 报告 $ver，不在 action 支持列表内。"
                   fi
@@ -428,7 +455,7 @@ jobs:
                 ;;
               latest|branch|head)
                 sha="$branch"
-                ver=$(susfs_version_of "$sha")
+                ver=$(susfs_version_of "simonpunk/susfs4ksu" "$sha")
                 if [ -n "$ver" ] && ! susfs_supported "$ver"; then
                   sha="${SUSFS_V220[$key]:-$branch}"
                   echo "::warning::SUSFS [$key] 分支头 $branch 报告 $ver，上游 action 尚不支持；已回退钉定值 ${sha}。"
@@ -441,6 +468,7 @@ jobs:
                 ;;
             esac
             susfs_map["$key"]="$sha"
+            susfs_repo_map["$key"]="https://gitlab.com/simonpunk/susfs4ksu.git"
           done
 
           # 6) 注入 ksu / susfs 字段，生成最终 matrix
@@ -459,9 +487,9 @@ jobs:
           fi
 
           for key in "${!susfs_map[@]}"; do
-            jq -c --arg k "$key" --arg s "${susfs_map[$key]}" \
+            jq -c --arg k "$key" --arg s "${susfs_map[$key]}" --arg r "${susfs_repo_map[$key]}" \
               'map(if (.android_version + "-" + .kernel_version) == $k
-                   then . + {susfs_resolved_hash: $s} else . end)' \
+                   then . + {susfs_resolved_hash: $s, susfs_repo: $r} else . end)' \
               /tmp/final.json > /tmp/final.tmp
             mv /tmp/final.tmp /tmp/final.json
           done
@@ -478,8 +506,14 @@ jobs:
           # 供 manager job 去官方 release 里挑版本号最接近的管理器 APK。
           # 注意：这里必须用 GET + -D 取响应头，不能用 -I（HEAD）—— GitHub API 对
           # HEAD 请求不返回 Link 头，会导致版本号算成 30000 进而选错 release。
+          # source 模式的 commit 在 pershoot fork 上，必须查 fork 的 API。
+          if [ "$KSU_REPO" = "$KSU_SOURCE_REPO" ]; then
+            ksuver_api_repo="pershoot/KernelSU-Next"
+          else
+            ksuver_api_repo="KernelSU-Next/KernelSU-Next"
+          fi
           ksuver_pages=$(curl -s -D - -o /dev/null --retry 2 \
-            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=${ksu_resolved}&per_page=1" \
+            "https://api.github.com/repos/${ksuver_api_repo}/commits?sha=${ksu_resolved}&per_page=1" \
             | tr -d '\r' | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"' \
             | grep -o '[0-9][0-9]*' | head -1 || true)
           ksuver=$(( ${ksuver_pages:-0} + 30000 ))
@@ -501,9 +535,11 @@ jobs:
             echo ""
             case "$SUSFS_MODE" in
               source)
-                echo "> **源码集成模式**：内核使用 pershoot/KernelSU-Next 的最新 dev-susfs 提交（\`$ksu_resolved\`，版本号 $ksuver），"
-                echo "> SUSFS 集成在 KSUN 内核树中，并同步使用对应 gki-* 分支的最新 SUSFS 源码补丁（\`${KSU_REPO}\`）。"
-                echo "> 该路径不再应用针对旧 KSUN 目录结构的本地 108KB 补丁链。"
+                echo "> **源码集成模式（WildKernels GKI 同款）**：KernelSU-Next 用 pershoot/KernelSU-Next 的"
+                echo "> \`dev-susfs\` 分支（commit \`$ksu_resolved\`，KSUN 侧已内置 SUSFS v2.3.0 集成），"
+                echo "> SUSFS 取 pershoot/susfs4ksu 的 \`gki-<版本>-dev\` 分支头（simonpunk 分支头 + 2 条 Toolkit 共存提交）。"
+                echo "> 内核侧不再打 10_enable_susfs_for_ksu.patch / next/susfs_fix_patches，"
+                echo "> 只保留 SUSFS 自带的 fs 覆盖 + 50_add_susfs_in_gki 补丁。"
                 ;;
               patched)
                 echo "> **源码补丁模式（钉定组合）**：SUSFS 与 KernelSU-Next 是**成对钉定**的 —— SUSFS 取各分支 2026-08-11 的提交，"
@@ -600,7 +636,7 @@ jobs:
         shell: bash
         run: |
           echo "config_json=$(jq -nc --argjson m '${{ toJSON(matrix) }}' \
-            '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash, .ksu_repo, .susfs_resolved_hash)')" >> "$GITHUB_OUTPUT"
+            '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash, .ksu_repo, .susfs_resolved_hash, .susfs_repo)')" >> "$GITHUB_OUTPUT"
 
       - name: Build Kernel
         id: build
@@ -611,6 +647,7 @@ jobs:
           ksu_branch_or_hash: ${{ matrix.ksu_resolved_hash }}
           ksu_repo: ${{ matrix.ksu_repo }}
           susfs_commit_hash_or_branch: ${{ matrix.susfs_resolved_hash }}
+          susfs_repo: ${{ matrix.susfs_repo }}
           optimize_level: ${{ inputs.optimize_level }}
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
