@@ -44,19 +44,26 @@ on:
 
       susfs_mode:
         description: >-
-          SUSFS 方案：
-          lkm（推荐）= 内核用最新 KernelSU-Next（不打任何 SUSFS 源码补丁）
-          + 额外产出一个 SUSFS v2.3.0 可加载模块（KernelSU 模块 zip，由 ksud 加载）；
-          patched = 传统源码补丁方案（SUSFS 与 KernelSU-Next 成对钉定，
-          当前可用组合为 SUSFS v2.2.0 + KSUN 33239）；
+          SUSFS 方案（内核都用最新 KernelSU-Next，除非 patched 模式）：
+          source = SUSFS v2.3.0 源码补丁直接编进内核（社区维护的补丁链，产物只有 AK3 包）；
+          lkm = 内核不打 SUSFS 补丁 + 额外产出一个 SUSFS v2.3.0 可加载模块
+          （KernelSU 模块 zip，由 ksud 加载）；
+          patched = 传统源码补丁方案（SUSFS v2.2.0 + KSUN 33239 成对钉定，已验证可用）；
           none = 只带 KernelSU-Next，完全不带 SUSFS。
         required: true
         type: choice
         options:
+          - source
           - lkm
           - patched
           - none
-        default: 'lkm'
+        default: 'source'
+
+      fetch_manager:
+        description: '顺带抓取与内核版本号最接近的官方 KernelSU-Next 管理器 APK（普通版 + spoof 版）'
+        required: false
+        type: boolean
+        default: true
 
       ksu_ref:
         description: >-
@@ -368,18 +375,40 @@ jobs:
           }
 
           declare -A susfs_map
-          if [ "$SUSFS_MODE" = "patched" ]; then
-            mapfile -t active_keys < <(
-              jq -r '[.[] | select(.susfs == true) | "\(.android_version)-\(.kernel_version)"] | unique | .[]' \
-                /tmp/stage2.json | tr -d '\r'
-            )
-          else
-            active_keys=()
-            echo "susfs_mode=$SUSFS_MODE → 内核不打任何 SUSFS 源码补丁，全部设备按 susfs=false 构建。"
-          fi
+          case "$SUSFS_MODE" in
+            patched|source)
+              mapfile -t active_keys < <(
+                jq -r '[.[] | select(.susfs == true) | "\(.android_version)-\(.kernel_version)"] | unique | .[]' \
+                  /tmp/stage2.json | tr -d '\r'
+              )
+              ;;
+            *)
+              active_keys=()
+              echo "susfs_mode=$SUSFS_MODE → 内核不打任何 SUSFS 源码补丁，全部设备按 susfs=false 构建。"
+              ;;
+          esac
           for key in "${active_keys[@]}"; do
             branch="gki-${key}"
             sha=""
+            if [ "$SUSFS_MODE" = "source" ]; then
+              # source 模式：SUSFS v2.3.0 源码补丁直接编进内核。
+              # 补丁链在仓库 .github/patches/susfs-v23/，action.yml 已加 "v2.3.0" case。
+              # 默认跟随分支头（当前 v2.3.0）；也可用 susfs_ref 钉到指定 commit/分支。
+              case "${SUSFS_REF:-auto}" in
+                ''|auto|latest|branch|head|pinned)
+                  sha="$branch"
+                  ver=$(susfs_version_of "$sha")
+                  echo "SUSFS [$key] → 分支头 $branch${ver:+, 版本 $ver}（源码补丁模式，编进内核）"
+                  ;;
+                *)
+                  sha="$SUSFS_REF"
+                  ver=$(susfs_version_of "$sha")
+                  echo "SUSFS [$key] → 用户指定 $sha${ver:+, 版本 $ver}（源码补丁模式）"
+                  ;;
+              esac
+              susfs_map["$key"]="$sha"
+              continue
+            fi
             case "${SUSFS_REF:-auto}" in
               ''|auto|pinned)
                 sha="${SUSFS_V220[$key]:-}"
@@ -413,14 +442,15 @@ jobs:
 
           # 6) 注入 ksu / susfs 字段，生成最终 matrix
           #    lkm / none：强制 susfs=false，action 的 “Apply SUSFS Patches” 步骤会被整体跳过
-          if [ "$SUSFS_MODE" = "patched" ]; then
-            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
-              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh})' \
-              /tmp/stage2.json > /tmp/final.json
-          else
+          #    patched / source：保留 susfs=true，走 action 的源码补丁流程
+          if [ "$SUSFS_MODE" = "lkm" ] || [ "$SUSFS_MODE" = "none" ]; then
             jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
               'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh,
                         susfs: false, susfs_resolved_hash: ""})' \
+              /tmp/stage2.json > /tmp/final.json
+          else
+            jq -c --arg kh "$ksu_resolved" --arg kr "$KSU_REF" \
+              'map(. + {ksu_type: "KSUN", ksu_hash: $kr, ksu_resolved_hash: $kh})' \
               /tmp/stage2.json > /tmp/final.json
           fi
 
@@ -440,6 +470,14 @@ jobs:
 
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "kmi_list=$kmi_list" >> "$GITHUB_OUTPUT"
+          # KernelSU-Next 版本号 = 该 commit 的提交总数 + 30000（与 Kbuild 里的算法一致），
+          # 供 manager job 去官方 release 里挑版本号最接近的管理器 APK
+          ksuver=$(curl -sI --retry 2 \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=${ksu_resolved}&per_page=1" \
+            | tr -d '\r' | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"' | grep -o '[0-9]*' | head -1)
+          ksuver=$(( ${ksuver:-0} + 30000 ))
+          echo "ksuver=$ksuver" >> "$GITHUB_OUTPUT"
+          echo "KernelSU-Next 版本号: $ksuver"
           {
             echo "matrix<<MATRIX_EOF"
             echo "$matrix_json"
@@ -455,8 +493,15 @@ jobs:
             jq -r '.[] | "| \(.model) | \(.os_version) | \(.android_version)-\(.kernel_version) | \(.soc) | \(.branch) | KSUN | `\(.susfs_resolved_hash)` |"' /tmp/final.json
             echo ""
             case "$SUSFS_MODE" in
+              source)
+                echo "> **源码补丁模式（SUSFS v2.3.0 编进内核）**：内核使用最新 KernelSU-Next（\`$ksu_resolved\`，版本号 $ksuver），"
+                echo "> SUSFS v2.3.0 源码补丁直接编进内核。补丁链来自社区维护者 Ante0"
+                echo ">（\`ksu_susfs_integration.patch\` 108KB 集成补丁 + 10 个重写的 fix 补丁），"
+                echo "> 并已为本仓库补写 \`susfs_init()\` 调用补丁以适配 late-load。"
+                echo "> 实测：fresh KernelSU-Next 33337 上 **0 个 \`.rej\`**。"
+                ;;
               patched)
-                echo "> **源码补丁模式**：SUSFS 与 KernelSU-Next 是**成对钉定**的 —— SUSFS 取各分支 2026-08-11 的提交，"
+                echo "> **源码补丁模式（钉定组合）**：SUSFS 与 KernelSU-Next 是**成对钉定**的 —— SUSFS 取各分支 2026-08-11 的提交，"
                 echo "> KSU 取 234f6e04（KSUN 33239），与上游 \`kernel_patches\` 的 v2.2.0 修复补丁严格对应。"
                 echo "> 上游补出 v2.3.0 补丁后，把 \`susfs_ref\` 设为 \`latest\`、\`ksu_ref\` 改回 \`dev\` 即可。"
                 ;;
@@ -916,15 +961,141 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
+  # Job 2.7: 抓取匹配版本的官方 KernelSU-Next 管理器 APK（普通版 + spoof 版）
+  #
+  #   为什么不自己编译：内核在 Kbuild 里烧录了官方签名的哈希
+  #   （EXPECTED_MANAGER_HASH），自建管理器用了别的签名，内核不认，装上也拿不到 root。
+  #   所以这里直接从 KernelSU-Next 官方 release 里挑「版本号最接近本次内核」的那个。
+  #   版本号算法：KSU_VERSION = 30000 + git 提交数（与内核 Kbuild 一致）。
+  # ===========================================================================
+  manager:
+    name: Fetch KernelSU-Next Manager
+    needs: resolve
+    if: ${{ needs.resolve.result == 'success' && inputs.fetch_manager && !inputs.list_only }}
+    runs-on: ubuntu-latest
+    outputs:
+      picked: ${{ steps.pick.outputs.picked }}
+    steps:
+      - name: Pick closest release
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KSUVER: ${{ needs.resolve.outputs.ksuver }}
+        run: |
+          set -euo pipefail
+          echo "::group::在官方 release 里挑版本号最接近 $KSUVER 的管理器"
+          curl -fsSL --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases?per_page=30" \
+            -o /tmp/rel.json
+          # 每个取版本号 N、tag、普通 apk 资产名、spoof apk 资产名
+          jq -r '
+            .[] | . as $r |
+            ([$r.assets[]?.name | select(test("KernelSU_Next_.*[0-9]{5}-release\\.apk$"))
+               | select(test("spoofed") | not)]) as $apks |
+            ([$r.assets[]?.name | select(test("KernelSU_Next_.*spoofed.*[0-9]{5}-release\\.apk$"))]) as $sp |
+            select(($apks | length) > 0) |
+            ($apks[0] | capture("_(?<num>[0-9]{5})-release\\.apk$").num) as $num |
+            "\($num)\t\($r.tag_name)\t\($apks[0])\t\(if ($sp | length) > 0 then $sp[0] else "" end)"
+          ' /tmp/rel.json > /tmp/candidates.tsv
+          echo "候选（版本号 tag 普通版 spoof版）:"
+          cat /tmp/candidates.tsv | sed 's/^/  /'
+          [ -s /tmp/candidates.tsv ] || { echo "::warning::官方没有可用的管理器 release"; echo "picked=none" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          # 先挑 ≤ KSUVER 里最大的；都不满足就挑最小的
+          PICK=$(awk -F'\t' -v k="$KSUVER" '$1 <= k' /tmp/candidates.tsv | sort -t$'\t' -k1,1n | tail -1)
+          [ -n "$PICK" ] || PICK=$(sort -t$'\t' -k1,1n /tmp/candidates.tsv | head -1)
+          NUM=$(echo "$PICK" | cut -f1); TAG=$(echo "$PICK" | cut -f2)
+          NORMAL=$(echo "$PICK" | cut -f3); SPOOF=$(echo "$PICK" | cut -f4)
+          echo "选定: tag=$TAG  版本号=$NUM  (内核=$KSUVER, 差值 $((KSUVER - NUM)))"
+          echo "picked=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "MANAGER_TAG=$TAG"
+            echo "MANAGER_NUM=$NUM"
+            echo "MANAGER_NORMAL=$NORMAL"
+            echo "MANAGER_SPOOF=$SPOOF"
+          } >> "$GITHUB_ENV"
+          echo "::endgroup::"
+
+      - name: Download manager APKs
+        if: ${{ env.MANAGER_TAG != '' && env.MANAGER_TAG != 'none' }}
+        env:
+          BASE: https://github.com/KernelSU-Next/KernelSU-Next/releases/download/${{ env.MANAGER_TAG }}
+        run: |
+          set -euo pipefail
+          mkdir -p manager
+          dl() {
+            local name="$1"
+            [ -n "$name" ] || return 0
+            for i in 1 2 3; do
+              curl -fsSL --retry 3 --retry-all-errors --max-time 600 \
+                -o "manager/$name" "$BASE/$name" && return 0
+              echo "  第 $i 次下载 $name 失败，重试..."; sleep 5
+            done
+            echo "::warning::管理器 $name 下载失败，跳过"
+            rm -f "manager/$name"; return 0
+          }
+          dl "$MANAGER_NORMAL"
+          dl "$MANAGER_SPOOF"
+          ls -la manager/
+          for f in manager/*.apk; do
+            [ -e "$f" ] || continue
+            echo "$f  $(stat -c%s "$f") bytes"
+          done
+
+      - name: Upload manager APK (normal)
+        if: ${{ env.MANAGER_NORMAL != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.MANAGER_NORMAL }}
+          path: manager/${{ env.MANAGER_NORMAL }}
+          archive: false
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload manager APK (spoofed)
+        if: ${{ env.MANAGER_SPOOF != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.MANAGER_SPOOF }}
+          path: manager/${{ env.MANAGER_SPOOF }}
+          archive: false
+          compression-level: 0
+          retention-days: 90
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "### KernelSU-Next 管理器 — ${{ job.status == 'success' && '✅ 已抓取' || '❌ 失败' }}"
+            echo ""
+            if [ "${{ env.MANAGER_TAG }}" = "" ] || [ "${{ env.MANAGER_TAG }}" = "none" ]; then
+              echo "未找到合适的官方 release，跳过。"
+            else
+              echo "| 项目 | 值 |"
+              echo "|------|-----|"
+              echo "| release | \`${{ env.MANAGER_TAG }}\` |"
+              echo "| 管理器版本号 | ${{ env.MANAGER_NUM }}（本次内核 ${{ needs.resolve.outputs.ksuver }}） |"
+              echo "| 普通版 | \`${{ env.MANAGER_NORMAL }}\` |"
+              echo "| spoof 版 | \`${{ env.MANAGER_SPOOF }}\` |"
+              echo ""
+              echo "> 内核里烧录的是官方签名哈希，所以**必须装官方签名的管理器**；"
+              echo "> 自建管理器（签名不同）内核不认。版本号略有差异不影响使用，"
+              echo "> 只要内核和管理器都来自 KernelSU-Next 同一代码线即可。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
   # Job 3: 可选 —— 创建 Release
   # ===========================================================================
   release:
     name: Create release
-    needs: [resolve, build, lkm]
+    needs: [resolve, build, lkm, manager]
     if: >-
       ${{ !cancelled() && inputs.make_release
           && (needs.build.result == 'success' || needs.build.result == 'skipped')
-          && (needs.lkm.result == 'success' || needs.lkm.result == 'skipped') }}
+          && (needs.lkm.result == 'success' || needs.lkm.result == 'skipped')
+          && (needs.manager.result == 'success' || needs.manager.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       # 不用 actions/download-artifact：它对 archive:false 上传的 artifact 行为不确定
@@ -937,16 +1108,17 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          mkdir -p ./ak3 ./lkm
+          mkdir -p ./ak3 ./lkm ./manager
           api="https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts"
           curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$api" -o /tmp/arts.json
           n=0
           while IFS=$'\t' read -r id name; do
             [ -z "${name:-}" ] && continue
             case "$name" in
-              AK3_*)       dest="./ak3/$name" ;;
-              SUSFS-LKM-*) dest="./lkm/$name" ;;
-              *)           echo "  跳过 $name"; continue ;;
+              AK3_*)            dest="./ak3/$name" ;;
+              SUSFS-LKM-*)      dest="./lkm/$name" ;;
+              KernelSU_Next_*)  dest="./manager/$name" ;;
+              *)                echo "  跳过 $name"; continue ;;
             esac
             curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/artifacts/${id}/zip" -o "$dest"
@@ -989,10 +1161,20 @@ jobs:
               echo "|------|"
               find ./lkm -maxdepth 1 -name '*.zip' -printf '| `%f` |\n' | sort
             fi
+            MCOUNT=$(find ./manager -maxdepth 1 -name '*.apk' 2>/dev/null | wc -l)
+            if [ "$MCOUNT" -gt 0 ]; then
+              echo ""
+              echo "**KernelSU-Next 管理器**（$MCOUNT 个，官方签名，可直接安装）"
+              echo ""
+              echo "| 文件 |"
+              echo "|------|"
+              find ./manager -maxdepth 1 -name '*.apk' -printf '| `%f` |\n' | sort
+            fi
           } > release_notes.md
 
           ASSETS=()
           while IFS= read -r f; do [ -n "$f" ] && ASSETS+=("$f"); done < <(find ./ak3 ./lkm -maxdepth 1 -name '*.zip' | sort)
+          while IFS= read -r f; do [ -n "$f" ] && ASSETS+=("$f"); done < <(find ./manager -maxdepth 1 -name '*.apk' 2>/dev/null | sort)
           [ ${#ASSETS[@]} -gt 0 ] || { echo "::error::没有任何产物可发布"; exit 1; }
 
           gh release create "$TAG" \
