@@ -1,0 +1,31 @@
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -427,6 +427,28 @@
+     return -ENOSYS;
+ }
+ 
++static void hook_selinux_status_open()
++{
++    if (orig_sel_open_handle_status)
++        return;
++    if (!sel_open_handle_status_slot) {
++        struct file_operations *ops = find_kernel_symbol_exact("sel_handle_status_ops");
++        if (!ops) {
++            pr_err("selinux_hide: sel_handle_status_ops not found, fake status will not work\n");
++            return;
++        }
++        sel_open_handle_status_slot = &ops->open;
++    }
++    sel_open_handle_status_fn new_fn = my_sel_open_handle_status;
++    orig_sel_open_handle_status = *sel_open_handle_status_slot;
++    int ret = ksu_patch_text(sel_open_handle_status_slot, &new_fn, sizeof(new_fn), KSU_PATCH_TEXT_FLUSH_DCACHE);
++    if (ret) {
++        pr_err("selinux_hide: init: patch_text sel_open_handle_status err: %d\n", ret);
++        sel_open_handle_status_slot = NULL;
++        orig_sel_open_handle_status = NULL;
++    }
++}
++
+ static void ksu_selinux_hide_unhook()
+ {
+     int ret;
