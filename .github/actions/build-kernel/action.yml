@@ -51,6 +51,13 @@ inputs:
     required: false
     type: boolean
     default: false
+  susfs_auto_pin:
+    description: >-
+      自动挑 SUSFS 提交：厂商树（一加）的 kernel sublevel 常年落后 GKI，SUSFS 分支 tip
+      的内核补丁会成片 .rej。打开后从新到旧试打（patch --dry-run），选第一个零 reject 的提交。
+    required: false
+    type: boolean
+    default: false
   github_token:
     description: 'GitHub Token'
     required: true
@@ -1017,6 +1024,34 @@ runs:
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         echo "KernelSU Version: $KSU_VERSION"
         echo "✅ KernelSU added (commit: ${KSU_COMMIT_SHA:0:8})"
+        echo "::endgroup::"
+
+    - name: 🧭 Auto-pin SUSFS commit (dry-run against this kernel tree)
+      # 一加/厂商树常年落后 GKI sublevel（例：OnePlus 6.12.38 vs GKI 6.12.92），
+      # SUSFS 分支 tip 的内核补丁会成片 .rej。这里从新到旧试打，选第一个零 reject 的提交，
+      # 并把 $SUSFS_FOLDER 直接换成那个提交的归档（后续步骤无需改动）。
+      if: ${{ env.OP_SUSFS == 'true' && inputs.susfs_auto_pin == 'true' }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        echo "::group::Auto-pin SUSFS commit"
+        PICK_JSON=/tmp/susfs-pick.json
+        rm -f "$PICK_JSON"
+        if python3 "${{ github.action_path }}/../../scripts/susfs_pick_commit.py" \
+             --branch "${SUSFS_KERNEL_BRANCH}" \
+             --tree "${COMMON_KERNEL_FOLDER}" \
+             --dest "${SUSFS_FOLDER}" \
+             --max-tries 8 \
+             --json-out "$PICK_JSON"; then
+          PICK_SHA="$(python3 -c "import json;print(json.load(open('$PICK_JSON'))['sha'])")"
+          PICK_VER="$(python3 -c "import json;print(json.load(open('$PICK_JSON')).get('version',''))")"
+          echo "SUSFS_BRANCH=$PICK_SHA" >> "$GITHUB_ENV"
+          echo "SUSFS_COMMIT_SHA=$PICK_SHA" >> "$GITHUB_ENV"
+          echo "SUSFS_AUTO_PIN=$PICK_SHA ($PICK_VER)" >> "$GITHUB_ENV"
+          echo "✅ auto-pinned SUSFS to $PICK_SHA ($PICK_VER)"
+        else
+          echo "::warning title=SUSFS auto-pin::所有候选都留 .rej，沿用原始分支 tip（大概率失败，请人工介入）"
+        fi
         echo "::endgroup::"
 
     - name: Apply SUSFS Patches
