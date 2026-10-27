@@ -4,6 +4,23 @@ permissions:
   contents: write
   actions: write
 
+# schedule（每周）没有 inputs，这里统一做「有效输入」归一化：
+#   · 手动触发：用你填的值
+#   · 定时触发：用 repo Variables（Settings → Variables），缺省见下
+env:
+  EFF_OP_MODEL: ${{ inputs.op_model || vars.WEEKLY_OP_MODEL || 'A16' }}
+  EFF_KSU_OPTIONS: ${{ inputs.ksu_options || '[{"type":"ksun","hash":"dev-susfs"}]' }}
+  EFF_MAKE_RELEASE: ${{ github.event_name == 'schedule' && (vars.WEEKLY_MAKE_RELEASE || 'true') || (inputs.make_release && 'true' || 'false') }}
+  EFF_KSUN_BUILTIN: ${{ github.event_name == 'schedule' && 'true' || (inputs.ksun_susfs_builtin && 'true' || 'false') }}
+  EFF_AUTO_PIN: ${{ github.event_name == 'schedule' && 'true' || (inputs.susfs_auto_pin && 'true' || 'false') }}
+  EFF_OPTIMIZE: ${{ inputs.optimize_level || 'O2' }}
+  EFF_CLEAN: ${{ inputs.clean_build && 'true' || 'false' }}
+  EFF_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
+  EFF_MIRROR: ${{ inputs.mirror_toolchains && 'true' || 'false' }}
+  EFF_BUILD_TS: ${{ inputs.build_timestamp || '' }}
+  EFF_SKIP_FEATURES: ${{ inputs.skip_features || '' }}
+
+
 on:
   workflow_dispatch:
     inputs:
@@ -94,6 +111,14 @@ on:
         type: string
         default: ''
 
+  # 每周一 02:00 (GMT+8) = 周日 18:00 UTC：跑一次「最新完整 release」
+  #   root = KernelSU-Next dev-susfs（自带 SUSFS 集成）
+  #   SUSFS = 各 KMI 分支 tip + auto-pin 兜底（厂商树落后时自动降级）
+  #   范围 = vars.WEEKLY_OP_MODEL（默认 A16；可设 A15 / A14+15+16 / android16-6.12 …）
+  #   成功即建 Release（vars.WEEKLY_MAKE_RELEASE=false 可关成只出 artifact）
+  schedule:
+    - cron: '0 18 * * 0'
+
 jobs:
   set-op-model:
     runs-on: ubuntu-24.04
@@ -109,6 +134,8 @@ jobs:
       ksu_resolved_hash:    ${{ steps.set-matrix.outputs.ksu_resolved_hash }}
       ksu_options_normalized: ${{ steps.set-matrix.outputs.ksu_options_normalized }}
       susfs_base_version: ${{ steps.set-matrix.outputs.susfs_base_version }}
+      make_release: ${{ steps.set-matrix.outputs.make_release }}
+      mirror: ${{ steps.set-matrix.outputs.mirror }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_HTTP_TIMEOUT: 600
@@ -127,8 +154,12 @@ jobs:
           set -euo pipefail
           echo "::group::Matrix generation"
           
-          input="${{ github.event.inputs.op_model }}"
-          ksu_options_raw='${{ github.event.inputs.ksu_options }}'
+          # job 级 if 不认 env 上下文，这里把归一化后的开关导出成 outputs
+          echo "make_release=${EFF_MAKE_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "mirror=${EFF_MIRROR}" >> "$GITHUB_OUTPUT"
+          
+          input="${EFF_OP_MODEL}"
+          ksu_options_raw="${EFF_KSU_OPTIONS}"
           if ! ksu_options_normalized=$(echo "$ksu_options_raw" | jq -c 'map(if .type then .type |= ascii_upcase | if .hash == null then if .type == "KSUN" then .hash = "dev" elif .type == "KSU" then .hash = "main" else .hash end else . end else error("No type found") end)' 2>&1); then
             echo "::error::ksu_options validation failed: $ksu_options_normalized"
             exit 1
@@ -226,7 +257,7 @@ jobs:
           ksu_ref=$(echo "$ksu_options_normalized" | jq -r '.[0].hash')
           
           if [ "$ksu_type" == "KSUN" ]; then
-            if [ "${{ inputs.ksun_susfs_builtin }}" = "true" ]; then
+            if [ "${{ env.EFF_KSUN_BUILTIN }}" = "true" ]; then
               # 自带 SUSFS 集成的 KSUN 在 pershoot fork 的 dev-susfs 分支
               KSU_REPO_OWNER="pershoot"
               KSU_REPO_NAME="KernelSU-Next"
@@ -327,7 +358,7 @@ jobs:
             HASH_QUERY="{ project(fullPath: \"${GITLAB_PROJECT_PATH}\") { repository { ch: commit(ref: \"${user_val}\") { sha } } } }"
             RELEASE_QUERY="{ project(fullPath: \"${GITLAB_PROJECT_PATH}\") { repository { ch: commit(ref: \"${user_val}\") { sha } blobs(paths: [\"kernel_patches/include/linux/susfs.h\"], ref: \"${user_val}\") { nodes { rawBlob } } } } }"
             
-            if [ "${{ inputs.make_release }}" = "true" ]; then
+            if [ "${{ env.EFF_MAKE_RELEASE }}" = "true" ]; then
               GL_QUERY="$RELEASE_QUERY"
             else
               GL_QUERY="$HASH_QUERY"
@@ -347,7 +378,7 @@ jobs:
                 if [ -n "$resolved" ] && [ "$resolved" != "null" ]; then
                   echo "  ✅ Query for $key Success"
                   
-                  if [ "${{ inputs.make_release }}" = "true" ]; then
+                  if [ "${{ env.EFF_MAKE_RELEASE }}" = "true" ]; then
                     extracted=$(echo "$RESPONSE" | jq -r '.data.project.repository.blobs.nodes[0].rawBlob // empty' | grep '#define SUSFS_VERSION' | awk -F'"' '{print $2}')
                     susfs_versions_per_key[$key]="${extracted:-unknown}"
                     echo "  ✅ $key → SUSFS_VERSION = ${extracted:-unknown}"
@@ -369,7 +400,7 @@ jobs:
             fi
             
             # Final Validation — SUSFS version
-            if [ "${{ inputs.make_release }}" = "true" ] && [ "${susfs_versions_per_key[$key]:-unknown}" = "unknown" ]; then
+            if [ "${{ env.EFF_MAKE_RELEASE }}" = "true" ] && [ "${susfs_versions_per_key[$key]:-unknown}" = "unknown" ]; then
               echo "::error::Could not extract SUSFS_VERSION from susfs.h for '$key' after $MAX_RETRIES attempts. Cannot proceed with release."
               exit 1
             fi
@@ -390,7 +421,7 @@ jobs:
           echo "susfs_hash_android16_6_12=${susfs_hashes[android16-6.12]:-unknown}" >> "$GITHUB_OUTPUT"
           
           # SUSFS_VERSION — only when releasing
-          if [ "${{ inputs.make_release }}" = "true" ]; then
+          if [ "${{ env.EFF_MAKE_RELEASE }}" = "true" ]; then
             susfs_base_version="unknown"
             for key in "${active_keys[@]}"; do
               ver="${susfs_versions_per_key[$key]:-unknown}"
@@ -479,7 +510,7 @@ jobs:
             fi
           fi
           
-          build_ts_input="${{ inputs.build_timestamp }}"
+          build_ts_input="${{ env.EFF_BUILD_TS }}"
           if [ -z "$build_ts_input" ]; then
             build_ts_display="⏱️ auto (current build time)"
           else
@@ -490,7 +521,7 @@ jobs:
             cat << 'EOF'
           ## 🎯 Build Plan
           
-          **Target:** ${{ inputs.op_model }}  
+          **Target:** ${{ env.EFF_OP_MODEL }}  
           **Devices:** ${{ steps.set-matrix.outputs.count }}  
           
           **Configuration:**
@@ -500,11 +531,11 @@ jobs:
             echo "- Build Timestamp: $build_ts_display"
           
             cat << 'EOF'
-          - Optimization: ${{ inputs.optimize_level }}
-          - Clean Build/No Ccache: ${{ inputs.clean_build && '✅ Yes' || '❌ No' }}
-          - Create Release: ${{ inputs.make_release && '✅ Yes' || '❌ No' }}
-          - Create Debug Artifacts: ${{ inputs.debug && '✅ Yes' || '❌ No' }}
-          - Sync toolchains: ${{ inputs.mirror_toolchains && '✅ Yes' || '❌ No' }}
+          - Optimization: ${{ env.EFF_OPTIMIZE }}
+          - Clean Build/No Ccache: ${{ env.EFF_CLEAN == 'true' && '✅ Yes' || '❌ No' }}
+          - Create Release: ${{ env.EFF_MAKE_RELEASE == 'true' && '✅ Yes' || '❌ No' }}
+          - Create Debug Artifacts: ${{ env.EFF_DEBUG == 'true' && '✅ Yes' || '❌ No' }}
+          - Sync toolchains: ${{ env.EFF_MIRROR == 'true' && '✅ Yes' || '❌ No' }}
           
           **SUSFS Configuration:**
           EOF
@@ -551,14 +582,14 @@ jobs:
           echo "> **💡 Note:** Hashes are resolved at run time via API calls before builds start." >> $GITHUB_STEP_SUMMARY
           
           # Add A restriction note for android-kernel filters
-          if [[ "${{ inputs.op_model }}" == android*-*.* ]]; then
+          if [[ "${{ env.EFF_OP_MODEL }}" == android*-*.* ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> **⚠️ Android-Kernel Filter:** Only A15 and A16 devices will be built for \`${{ inputs.op_model }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "> **⚠️ Android-Kernel Filter:** Only A15 and A16 devices will be built for \`${{ env.EFF_OP_MODEL }}\`" >> $GITHUB_STEP_SUMMARY
           fi
 
   mirror_toolchain:
     needs: set-op-model
-    if: ${{ inputs.mirror_toolchains }}
+    if: ${{ needs.set-op-model.outputs.mirror == 'true' }}
     uses: ./.github/workflows/mirror-toolchains.yml
     secrets: inherit
 
@@ -709,7 +740,7 @@ jobs:
         id: prepare_config
         shell: bash
         env:
-          SKIP_FEATURES: ${{ inputs.skip_features }}
+          SKIP_FEATURES: ${{ env.EFF_SKIP_FEATURES }}
         run: |
           set -euo pipefail
           CONFIG_JSON="$(jq -nc --argjson m '${{ toJSON(matrix) }}' '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash)')"
@@ -733,12 +764,12 @@ jobs:
           ksu_type: ${{ matrix.ksu_type }}
           ksu_branch_or_hash: ${{ matrix.ksu_resolved_hash }}
           susfs_commit_hash_or_branch: ${{ matrix.susfs_resolved_hash }}
-          optimize_level: ${{ inputs.optimize_level }}
-          build_timestamp: ${{ inputs.build_timestamp }}
-          clean: ${{ inputs.clean_build }}
-          debug: ${{ inputs.debug }}
-          ksun_susfs_builtin: ${{ inputs.ksun_susfs_builtin }}
-          susfs_auto_pin: ${{ inputs.susfs_auto_pin }}
+          optimize_level: ${{ env.EFF_OPTIMIZE }}
+          build_timestamp: ${{ env.EFF_BUILD_TS }}
+          clean: ${{ env.EFF_CLEAN }}
+          debug: ${{ env.EFF_DEBUG }}
+          ksun_susfs_builtin: ${{ env.EFF_KSUN_BUILTIN }}
+          susfs_auto_pin: ${{ env.EFF_AUTO_PIN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
@@ -775,7 +806,7 @@ jobs:
             fi
             echo "  - Build time: ${{ steps.build.outputs.build_time }}s"
             
-            if [ "${{ inputs.clean_build }}" != "true" ]; then
+            if [ "${{ env.EFF_CLEAN }}" != "true" ]; then
               echo "  - ccache hit rate: ${{ steps.build.outputs.ccache_hit_rate }}"
               echo "  - ccache direct rate: ${{ steps.build.outputs.ccache_direct_rate }}"
             else
@@ -832,7 +863,7 @@ jobs:
           | **Build Time** | ${{ steps.build.outputs.build_time }}s |
           EOF
             
-            if [ "${{ inputs.clean_build }}" != "true" ]; then
+            if [ "${{ env.EFF_CLEAN }}" != "true" ]; then
               cat >> $GITHUB_STEP_SUMMARY << EOF
           | **ccache Hit Rate** | ${{ steps.build.outputs.ccache_hit_rate }} |
           | **ccache Direct Rate** | ${{ steps.build.outputs.ccache_direct_rate }} |
@@ -882,7 +913,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: |
       !cancelled() &&
-      inputs.make_release == true &&
+      needs.set-op-model.outputs.make_release == 'true' &&
       needs.build.result == 'success' &&
       needs.set-op-model.result == 'success'
     env:
@@ -962,8 +993,8 @@ jobs:
           ksu_ref="${{ fromJSON(needs.set-op-model.outputs.ksu_options_normalized)[0].hash }}"
           ksu_resolved_hash="${{ needs.set-op-model.outputs.ksu_resolved_hash }}"
           
-          OPTIMIZE_LEVEL="${{ inputs.optimize_level }}"
-          CLEAN_BUILD="${{ inputs.clean_build }}"
+          OPTIMIZE_LEVEL="${{ env.EFF_OPTIMIZE }}"
+          CLEAN_BUILD="${{ env.EFF_CLEAN }}"
           
           # Hash map for GKI version
           declare -A susfs_map=(
@@ -1248,7 +1279,7 @@ jobs:
           - Added IP_SET, IPv6 NAT and TTL support.
           - Added TMPFS_XATTR and TMPFS_POSIX_ACL support for Mountify.
           - Added Ptrace leak fix for kernels < 5.16.
-          - Compiler optimizations (${{ inputs.optimize_level }}).
+          - Compiler optimizations (${{ env.EFF_OPTIMIZE }}).
           - Additional General Optimisations.
           - Wild_KSU Manager Support.
           - Unicode Bypass Fix
