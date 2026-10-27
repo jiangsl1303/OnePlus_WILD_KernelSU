@@ -86,6 +86,21 @@ def download_archive(sha: str, out_dir: Path, retries: int = 3) -> Path | None:
     return None
 
 
+def parse_ver(text: str) -> tuple[int, ...]:
+    m = re.search(r"v?(\d+(?:\.\d+)*)", text or "")
+    if not m:
+        return (0,)
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
+def read_version(extract_dir: Path) -> str:
+    hdr = extract_dir / "kernel_patches" / "include" / "linux" / "susfs.h"
+    if not hdr.exists():
+        return ""
+    m = re.search(r'#define\s+SUSFS_VERSION\s+"([^"]+)"', hdr.read_text(errors="replace"))
+    return m.group(1) if m else ""
+
+
 def patch_file_for(extract_dir: Path, branch: str) -> Path | None:
     exact = extract_dir / "kernel_patches" / f"50_add_susfs_in_{branch}.patch"
     if exact.exists():
@@ -153,6 +168,8 @@ def main() -> int:
     ap.add_argument("--max-tries", type=int, default=8)
     ap.add_argument("--json-out", default="")
     ap.add_argument("--list-only", action="store_true", help="只打印候选阶梯，不下载")
+    ap.add_argument("--min-version", default="v2.2.0",
+                    help="SUSFS 版本下限；低于它的老提交会启用 NEED_HOOKS 等另一套代码路径，必须排除")
     args = ap.parse_args()
 
     tree = Path(args.tree)
@@ -186,17 +203,17 @@ def main() -> int:
             extract = download_archive(sha, work)
             if not extract:
                 continue
+            ver = read_version(extract)
+            if parse_ver(ver) < parse_ver(args.min_version):
+                log(f"    [x] 版本 {ver or '?'} < 下限 {args.min_version}（老版本会走 NEED_HOOKS 另一套路径），跳过")
+                shutil.rmtree(extract, ignore_errors=True)
+                continue
             pf = patch_file_for(extract, args.branch)
             if not pf:
                 log("    [x] 该提交里没有匹配的内核补丁")
                 shutil.rmtree(extract, ignore_errors=True)
                 continue
             if try_patch(tree, pf):
-                ver = ""
-                hdr = extract / "kernel_patches" / "include" / "linux" / "susfs.h"
-                if hdr.exists():
-                    m = re.search(r'#define\s+SUSFS_VERSION\s+"([^"]+)"', hdr.read_text(errors="replace"))
-                    ver = m.group(1) if m else ""
                 if dest.exists():
                     shutil.rmtree(dest, ignore_errors=True)
                 shutil.move(str(extract), str(dest))
