@@ -30,10 +30,15 @@ on:
           - android12-5.10
         default: A14+15+16
       ksu_options:
-        description: 'Enter KernelSU build json'
+        description: 'Enter KernelSU build json（默认走 pershoot dev-susfs：自带 SUSFS 集成的那一支 KernelSU-Next）'
         required: true
         type: string
-        default: '[{"type":"ksun","hash":"dev"}]'
+        default: '[{"type":"ksun","hash":"dev-susfs"}]'
+      ksun_susfs_builtin:
+        description: 'KSUN 自带 SUSFS 集成（pershoot dev-susfs）。true = 跳过 10_enable + next/susfs_fix_patches，SUSFS 补丁直接走内核侧 50_add'
+        required: false
+        type: boolean
+        default: true
       optimize_level:
         description: "Compiler optimization level"
         required: true
@@ -211,8 +216,14 @@ jobs:
           ksu_ref=$(echo "$ksu_options_normalized" | jq -r '.[0].hash')
           
           if [ "$ksu_type" == "KSUN" ]; then
-            KSU_REPO_OWNER="KernelSU-Next"
-            KSU_REPO_NAME="KernelSU-Next"
+            if [ "${{ inputs.ksun_susfs_builtin }}" = "true" ]; then
+              # 自带 SUSFS 集成的 KSUN 在 pershoot fork 的 dev-susfs 分支
+              KSU_REPO_OWNER="pershoot"
+              KSU_REPO_NAME="KernelSU-Next"
+            else
+              KSU_REPO_OWNER="KernelSU-Next"
+              KSU_REPO_NAME="KernelSU-Next"
+            fi
           else
             KSU_REPO_OWNER="tiann"
             KSU_REPO_NAME="KernelSU"
@@ -702,6 +713,7 @@ jobs:
           build_timestamp: ${{ inputs.build_timestamp }}
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
+          ksun_susfs_builtin: ${{ inputs.ksun_susfs_builtin }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
