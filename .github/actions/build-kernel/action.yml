@@ -42,6 +42,15 @@ inputs:
     required: false
     type: boolean
     default: false
+  ksun_susfs_builtin:
+    description: >-
+      KSUN 是否已自带 SUSFS 集成（pershoot/KernelSU-Next 的 dev-susfs 分支）。
+      true 时：改用 pershoot 的 setup.sh，并跳过 10_enable_susfs_for_ksu.patch
+      与 next/susfs_fix_patches/*（那两个东西只用于给“不带 SUSFS 的 KSUN”打补丁，
+      且 kernel_patches 里根本没有 v2.3.0 的 fix 集，硬跑必死）。
+    required: false
+    type: boolean
+    default: false
   github_token:
     description: 'GitHub Token'
     required: true
@@ -899,10 +908,20 @@ runs:
         cd "$KERNEL_PLATFORM_FOLDER"
         echo "Adding KernelSU Next..."
         KSU_INPUT="${{ inputs.ksu_branch_or_hash }}"
-        if [ -z "$KSU_INPUT" ]; then
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        # KSUN 自带 SUSFS 集成时（pershoot dev-susfs），必须用它自己的 setup.sh ——
+        # 官方 next/kernel/setup.sh 写死了 KernelSU-Next/KernelSU-Next 仓库，
+        # 拉不到带集成的那一支。
+        if [ "${{ inputs.ksun_susfs_builtin }}" = "true" ]; then
+          KSUN_SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
+          [ -n "$KSU_INPUT" ] || KSU_INPUT="dev-susfs"
+          echo "Using SUSFS-integrated KernelSU-Next (pershoot dev-susfs), ref=${KSU_INPUT}"
         else
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_INPUT"
+          KSUN_SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+        fi
+        if [ -z "$KSU_INPUT" ]; then
+          curl --fail --location --proto '=https' -LSs "$KSUN_SETUP_URL" | bash -
+        else
+          curl --fail --location --proto '=https' -LSs "$KSUN_SETUP_URL" | bash -s "$KSU_INPUT"
         fi
         git submodule update --init --recursive
         cd KernelSU-Next/kernel
@@ -1027,6 +1046,13 @@ runs:
           echo "NEED_HOOKS=false" >> $GITHUB_ENV
         fi
         
+        # KSUN 已自带 SUSFS 集成（pershoot dev-susfs）时，10_enable_susfs_for_ksu.patch
+        # 和 next/susfs_fix_patches/* 全部跳过：它们存在的意义是把 SUSFS 装进“裸 KSUN”，
+        # 对已经集成的树重复打只会制造 .rej；而且 kernel_patches 里没有 v2.3.0 的 fix 集，
+        # 硬跑必然 `No such file or directory`（run 40550110431 就是这么挂的）。
+        if [ "${{ inputs.ksun_susfs_builtin }}" = "true" ] && [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+          echo "KSUN carries built-in SUSFS integration → skip 10_enable_susfs_for_ksu.patch + next/susfs_fix_patches"
+        else
         case "$susfs_version" in
           "v1.5.8")
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
@@ -1126,6 +1152,7 @@ runs:
             exit 1
             ;;
         esac
+        fi
         
         cd "$COMMON_KERNEL_FOLDER"
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
