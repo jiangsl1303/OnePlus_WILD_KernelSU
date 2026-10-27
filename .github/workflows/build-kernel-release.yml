@@ -19,6 +19,7 @@ env:
   EFF_MIRROR: ${{ inputs.mirror_toolchains && 'true' || 'false' }}
   EFF_BUILD_TS: ${{ inputs.build_timestamp || '' }}
   EFF_SKIP_FEATURES: ${{ inputs.skip_features || '' }}
+  EFF_SUSFS_MIN_VER: ${{ inputs.susfs_min_version || 'v2.2.0' }}
 
 
 on:
@@ -61,6 +62,11 @@ on:
         required: false
         type: boolean
         default: true
+      susfs_min_version:
+        description: 'auto-pin 的 SUSFS 版本下限（默认 v2.2.0）。老树实在找不到候选时可下调到 v2.1.0 试试'
+        required: false
+        type: string
+        default: 'v2.2.0'
       skip_features:
         description: '本次临时关掉的特性（逗号分隔，覆盖 configs 里的默认值）。可选：ds,bbg,bbr,bbr3,ttl,ip_set,unicode,ntsync,opt。例：ds 可绕开 DroidSpaces 补丁与老内核的 hunk 冲突'
         required: false
@@ -770,6 +776,7 @@ jobs:
           debug: ${{ env.EFF_DEBUG }}
           ksun_susfs_builtin: ${{ env.EFF_KSUN_BUILTIN }}
           susfs_auto_pin: ${{ env.EFF_AUTO_PIN }}
+          susfs_min_version: ${{ env.EFF_SUSFS_MIN_VER }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
