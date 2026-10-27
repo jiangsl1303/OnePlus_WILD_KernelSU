@@ -44,6 +44,11 @@ on:
         required: false
         type: boolean
         default: true
+      skip_features:
+        description: '本次临时关掉的特性（逗号分隔，覆盖 configs 里的默认值）。可选：ds,bbg,bbr,bbr3,ttl,ip_set,unicode,ntsync,opt。例：ds 可绕开 DroidSpaces 补丁与老内核的 hunk 冲突'
+        required: false
+        type: string
+        default: ''
       optimize_level:
         description: "Compiler optimization level"
         required: true
@@ -703,8 +708,22 @@ jobs:
       - name: 🧹 Prepare op_config_json (without KSU fields)
         id: prepare_config
         shell: bash
+        env:
+          SKIP_FEATURES: ${{ inputs.skip_features }}
         run: |
-          echo "config_json=$(jq -nc --argjson m '${{ toJSON(matrix) }}' '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash)')" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          CONFIG_JSON="$(jq -nc --argjson m '${{ toJSON(matrix) }}' '$m | del(.ksu_type, .ksu_hash, .ksu_resolved_hash)')"
+          # 允许单次运行临时关掉若干特性（configs/*.json 里默认都是 true）
+          for f in $(printf '%s' "${SKIP_FEATURES:-}" | tr ',' ' '); do
+            case "$f" in
+              ds|bbg|bbr|bbr3|ttl|ip_set|unicode|ntsync|opt|susfs)
+                CONFIG_JSON="$(jq -c --arg k "$f" '. + {($k): false}' <<<"$CONFIG_JSON")"
+                echo "::notice::skip feature on request: $f"
+                ;;
+              *) echo "::warning::skip_features 里未知特性 '$f'（已忽略）" ;;
+            esac
+          done
+          echo "config_json=$CONFIG_JSON" >> "$GITHUB_OUTPUT"
 
       - name: 🔨 Build Kernel
         id: build
