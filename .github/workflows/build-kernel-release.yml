@@ -39,6 +39,11 @@ on:
         required: false
         type: boolean
         default: true
+      susfs_auto_pin:
+        description: '自动挑 SUSFS 提交：厂商树落后 GKI sublevel，从新到旧 dry-run 试打，选第一个零 reject 的提交'
+        required: false
+        type: boolean
+        default: true
       optimize_level:
         description: "Compiler optimization level"
         required: true
@@ -714,6 +719,7 @@ jobs:
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
           ksun_susfs_builtin: ${{ inputs.ksun_susfs_builtin }}
+          susfs_auto_pin: ${{ inputs.susfs_auto_pin }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
