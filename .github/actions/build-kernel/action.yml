@@ -58,6 +58,13 @@ inputs:
     required: false
     type: boolean
     default: false
+  susfs_min_version:
+    description: >-
+      auto-pin 的 SUSFS 版本下限（默认 v2.2.0）。低于它的老版本会走 NEED_HOOKS 的另一套
+      补丁路径，与当前 KernelSU-Next 不配套；只有确认老树必须降级时才调低。
+    required: false
+    type: string
+    default: 'v2.2.0'
   github_token:
     description: 'GitHub Token'
     required: true
@@ -1042,6 +1049,7 @@ runs:
              --tree "${COMMON_KERNEL_FOLDER}" \
              --dest "${SUSFS_FOLDER}" \
              --max-tries 8 \
+             --min-version "${{ inputs.susfs_min_version }}" \
              --json-out "$PICK_JSON"; then
           PICK_SHA="$(python3 -c "import json;print(json.load(open('$PICK_JSON'))['sha'])")"
           PICK_VER="$(python3 -c "import json;print(json.load(open('$PICK_JSON')).get('version',''))")"
