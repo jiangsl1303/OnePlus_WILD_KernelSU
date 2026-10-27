@@ -1752,30 +1752,44 @@ runs:
         echo "::group::Add Droidspaces Support"
         set -euo pipefail
         cd "$COMMON_KERNEL_FOLDER"
-        
+        # DroidSpaces 只是可选特性：补丁和某些厂商树（如 wild/sm8750 @ 6.6）对不上时
+        # 不应该把整台设备的构建带走 —— 降级为「本次不启用 DS」并还原已打了一半的文件。
+        DS_OK=1
+
         echo "Applying patch to enable SYSVIPC without breaking ABI"
         case "$OP_BRANCH" in
           wild/sm8850|wild/sm8845)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch" || DS_OK=0
             ;;
           wild/sm8550|wild/sm7550)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_1_2_3.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_1_2_3.patch" || DS_OK=0
             ;;
           wild/sm8450|wild/sm8475|wild/mt6895|wild/mt6983|wild/mt6789)
             if [ "$ANDROID_VER" = "android12" ] && [ "$KERNEL_VER" = "5.10" ]; then
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_bypass_a16-6.12_below.patch"
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch"
+              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_bypass_a16-6.12_below.patch" || DS_OK=0
+              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch" || DS_OK=0
             else
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
+              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch" || DS_OK=0
             fi
             ;;
           *)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch" || DS_OK=0
             ;;
         esac
         
         echo "Patch to fix kernel panic caused by oplus_bsp_midas"
-        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
+        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch" || DS_OK=0
+
+        if [ "$DS_OK" != "1" ]; then
+          echo "::warning title=DroidSpaces skipped::DroidSpaces 补丁与当前内核树不匹配，本次跳过 DS（内核 / KernelSU / SUSFS 不受影响）"
+          for f in $(git diff --name-only 2>/dev/null || true); do
+            git checkout -- "$f" 2>/dev/null || true
+          done
+          find . -name '*.rej' -delete 2>/dev/null || true
+          find . -name '*.orig' -delete 2>/dev/null || true
+          echo "::endgroup::"
+          exit 0
+        fi
         
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_SYSVIPC=y
